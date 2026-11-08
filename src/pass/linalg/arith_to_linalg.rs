@@ -569,7 +569,10 @@ impl Tt {
         let b = &*cr.rw.body;
         let mut args: Vec<ValueId> = o.iter().flatten().copied().collect();
         let callee = b[op].get("callee").cloned();
-        let name = callee.as_ref().and_then(|c| c.text().ok()).map(|n| n.trim_start_matches('@').to_owned());
+        let name = match callee.as_ref() {
+            Some(Attribute::SymbolRef(path)) => path.first().map(|n| n.to_string()),
+            _ => None,
+        };
         let parent = {
             let mut at = b.parent_op(op);
             while let Some(p) = at.filter(|p| !b.is(*p, Kind::TtFunc)) {

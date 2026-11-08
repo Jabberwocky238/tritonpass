@@ -280,7 +280,7 @@ pub trait TtBuilder<'a> {
     fn make_tptr(&mut self, base: ValueId, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr], shape: &[Ofr], order: &[i64], ty: Type<'a>) -> ValueId;
 }
 
-impl<'a> TtBuilder<'a> for mlirpass::Rewriter<'_, 'a> {
+impl<'a, L: mlirpass::Listener<'a> + ?Sized> TtBuilder<'a> for mlirpass::Rewriter<'_, 'a, L> {
     fn value(&mut self, k: Kind, operands: &[ValueId], ty: Type<'a>) -> ValueId {
         let o = self.create(OpData::build(k.name()).operands(operands), &[ty]);
         self.body.res(o, 0)

@@ -7,6 +7,7 @@ use mlirformat::{Attribute, Dim, Error, Shaped, ShapedKind, StridedLayout, Type}
 use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
 
 use crate::ir::{At, Cursor, dense_i32, dense_i64, dense_values};
+use crate::pass::ofr::OfrBuilder;
 use crate::pass::ofr::Ofr;
 use crate::pass::window::{StrideKind, Tptr, UNBOUNDED, Window};
 use crate::{Ir, Kind, pointee};
@@ -77,6 +78,21 @@ impl Mem {
         Self::memref(&sizes.iter().map(c).collect::<Vec<_>>(), (*s.elem).clone(), Some(StridedLayout { strides, offset }))
     }
 
+    /// `memref::SubViewOp::inferResultType`，行距也照算（动态的行距让结果的行距也动态）。
+    fn subview_type_strided<'a>(src: &Type<'a>, offsets: &[Ofr], sizes: &[Ofr], strides: &[Ofr]) -> Type<'a> {
+        let Type::Shaped(s) = src else { unreachable!("memref") };
+        let (src_strides, off) = s.strides_and_offset().expect("strided");
+        let c = |o: &Ofr| o.int().unwrap_or(Dim::DYNAMIC);
+        let mul = |a: i64, b: i64| if a == 0 || b == 0 { 0 } else if a == Dim::DYNAMIC || b == Dim::DYNAMIC { Dim::DYNAMIC } else { a * b };
+        let add = |a: i64, b: i64| if a == Dim::DYNAMIC || b == Dim::DYNAMIC { Dim::DYNAMIC } else { a + b };
+        let mut offset = off;
+        for (o, st) in offsets.iter().map(c).zip(&src_strides) {
+            offset = add(offset, mul(o, *st));
+        }
+        let out_strides: Vec<i64> = src_strides.iter().zip(strides.iter().map(c)).map(|(a, b)| mul(*a, b)).collect();
+        Self::memref(&sizes.iter().map(c).collect::<Vec<_>>(), (*s.elem).clone(), Some(StridedLayout { strides: out_strides, offset }))
+    }
+
     /// 带 offsets / sizes / strides 三段的 op（subview、reinterpret_cast、extract_slice）。
     fn sliced<'a>(name: &str, src: ValueId, lists: [&[Ofr]; 3]) -> OpData<'a> {
         let mut operands = vec![src];
@@ -139,6 +155,16 @@ impl WithTc {
         true
     }
 
+    /// `MakeGatherScatterTensorPtrConverter`：只剩转换过的基指针（同型的 unrealized cast），读写时再按行拆。
+    #[convert("tts.make_gather_scatter_tptr")]
+    fn make_gather_scatter_tptr(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        let base = o[0][0];
+        let ty = cr.rw.body[base].ty.clone();
+        let v = Mem::create(cr, OpData::named("builtin.unrealized_conversion_cast").operands(&[base]), ty);
+        cr.replace_values(op, &[v]);
+        true
+    }
+
     #[convert("tts.gather")]
     fn scalar_gather(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         if !Mem::scalar_gather(cr.rw.body, op) {
@@ -166,6 +192,9 @@ impl NoTc {
     #[convert("tts.load")]
     fn load(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
+        if let Some(gs) = b.def_of(b.opd(op, 0), Kind::TtsMakeGatherScatterTptr) {
+            return GatherScatter::of(b, gs).load(cr, op, o[0][0]);
+        }
         let Some(make) = b.def_of(b.opd(op, 0), Kind::TtsMakeTptr) else { return false };
         if !Window::check(b, make, Window::is_written(b, make), &mut Vec::new()) {
             return false;
@@ -206,6 +235,9 @@ impl NoTc {
     #[convert("tts.store")]
     fn store(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
+        if let Some(gs) = b.def_of(b.opd(op, 0), Kind::TtsMakeGatherScatterTptr) {
+            return GatherScatter::of(b, gs).store(cr, op, o[0][0], o[1][0]);
+        }
         let Some(make) = b.def_of(b.opd(op, 0), Kind::TtsMakeTptr) else { return false };
         if !Window::check(b, make, true, &mut Vec::new()) {
             return false;
@@ -274,5 +306,193 @@ impl NoTc {
     fn fill(cr: &mut Cr<'_, '_, '_>, value: ValueId, alloc: ValueId) {
         let et = cr.rw.body[alloc].ty.element_type().clone();
         cr.structured(Kind::LinalgFill.name(), &[value], &[alloc], &[], Vec::new(), &mut |cr, a| vec![cr.cast_scalar(a[0], &et, false)]);
+    }
+}
+
+/// `tts.make_gather_scatter_tptr` 读出来的样子：基指针（转换前）、按行取的偏移张量与 mask、gather 维、各维尺寸、行距、偏移。
+struct GatherScatter {
+    base: ValueId,
+    offset: ValueId,
+    mask: Option<ValueId>,
+    dim: usize,
+    sizes: Vec<i64>,
+    strides: Vec<Ofr>,
+    offsets: Vec<Ofr>,
+    result: Type<'static>,
+}
+
+impl GatherScatter {
+    fn of(b: &Body<'_>, op: OpId) -> Self {
+        let seg = dense_values(b[op].get("operandSegmentSizes"));
+        let ops = &b[op].operands;
+        let n = |i: usize| seg.get(i).copied().unwrap_or(0) as usize;
+        let (ns, no) = (n(2), n(3));
+        let strides = Tptr::mixed(b, op, "static_strides", &ops[2..2 + ns]);
+        let offsets = Tptr::mixed(b, op, "static_offsets", &ops[2 + ns..2 + ns + no]);
+        let mask = (n(4) > 0).then(|| ops[2 + ns + no]);
+        Self {
+            base: ops[0],
+            offset: ops[1],
+            mask,
+            dim: b.int_attr(op, "gather_scatter_dim").unwrap_or(0) as usize,
+            sizes: dense_values(b[op].get("sizes")),
+            strides,
+            offsets,
+            result: b.ty(b.res(op, 0)).owned(),
+        }
+    }
+
+    /// `getMixedStridesForMemref`：尺寸为 1、行距为常量 0 的维换成累乘的尺寸（从最内一维往外）。
+    fn memref_strides(&self) -> Vec<Ofr> {
+        let mut out = Vec::new();
+        let mut acc = 1i64;
+        for (size, stride) in self.sizes.iter().zip(&self.strides).rev() {
+            out.push(if *size == 1 && stride.int() == Some(0) { Ofr::idx(acc) } else { *stride });
+            acc *= size;
+        }
+        out.reverse();
+        out
+    }
+
+    /// `rewriteGatherScatterPtrElement`：第 `elt` 行的视图（gather 维尺寸 1）。
+    fn element(&self, cr: &mut Cr<'_, '_, '_>, memref: ValueId, elt: ValueId) -> ValueId {
+        let strides = self.memref_strides();
+        let mut offsets = self.offsets.clone();
+        offsets[self.dim] = Ofr::V(elt);
+        let mut target = Ofr::idx(0);
+        for (i, o) in offsets.iter().enumerate() {
+            let o = if i == self.dim { cr.rw.mul_ofr(*o, strides[i]) } else { *o };
+            target = cr.rw.add_ofr(target, o);
+        }
+        let mut sizes = self.sizes.clone();
+        sizes[self.dim] = 1;
+        let elem = pointee(&self.result).element_type().clone();
+        let layout = StridedLayout { strides: strides.iter().map(|s| s.static_value()).collect(), offset: target.int().unwrap_or(Dim::DYNAMIC) };
+        let ty = Mem::memref(&sizes, elem, Some(layout));
+        let size_ofr: Vec<Ofr> = sizes.iter().map(|s| Ofr::idx(*s)).collect();
+        Mem::create(cr, Mem::sliced(Kind::MemrefReinterpretCast.name(), memref, [&[target], &size_ofr, &strides]), ty)
+    }
+
+    fn index(cr: &mut Cr<'_, '_, '_>, v: i64) -> ValueId {
+        Mem::create(cr, OpData::build(Kind::ArithConstant.name()).with("value", Attribute::index(v)), Type::Index)
+    }
+
+    /// 偏移转成 index、循环上界（mask 收窄）、空循环与（有非结构化 mask 时）其中的 scf.if；插入点留在体的开头（或 then 里）。
+    /// 返回（循环，0，1，归纳变量，偏移张量，各维尺寸）。
+    #[expect(clippy::type_complexity, reason = "几样一起交出")]
+    fn begin(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, mask: Option<Vec<Ofr>>) -> (OpId, ValueId, ValueId, ValueId, ValueId, Vec<Ofr>) {
+        let ot = cr.rw.body.ty(self.offset).clone();
+        let oshape = ot.dims().unwrap_or_default();
+        let mut size = oshape[0];
+        let offset = Mem::create(cr, OpData::build(Kind::ArithIndexCast.name()).operands(&[self.offset]), Type::tensor(&oshape, Type::Index));
+        let mut sizes: Vec<Ofr> = self.sizes.iter().map(|s| Ofr::idx(*s)).collect();
+        sizes[self.dim] = Ofr::idx(1);
+        let lb = Self::index(cr, 0);
+        let mut ub = Self::index(cr, size);
+        if let Some(dims) = &mask {
+            match dims[self.dim] {
+                Ofr::I(v, _) => {
+                    let v = if v == 0 && self.mask.is_some() { size } else { v };
+                    size = size.min(v);
+                    ub = Self::index(cr, size);
+                }
+                Ofr::V(d) => {
+                    let s = Self::index(cr, size);
+                    ub = Mem::create(cr, OpData::build(Kind::ArithMinsi.name()).operands(&[d, s]), Type::Index);
+                }
+            }
+        }
+        let step = Self::index(cr, 1);
+        let loc = cr.rw.loc.clone();
+        let l = cr.rw.create_with(OpData::build(Kind::ScfFor.name()).operands(&[lb, ub, step]), &[], |b, o| {
+            let r = b.add_region(o);
+            let blk = b.add_block(r, &[(Type::Index, loc.clone())]);
+            let y = b.create(OpData::build(Kind::ScfYield.name()), &[]);
+            b.insert(y, blk, None);
+        });
+        (l, lb, step, cr.rw.body[cr.rw.body.top_block(l)].args[0], offset, sizes)
+    }
+
+    /// 插入点移进循环体（有非结构化 mask 时再进 `scf.if` 的 then）。
+    fn enter(&self, cr: &mut Cr<'_, '_, '_>, l: OpId, iv: ValueId) {
+        let blk = cr.rw.body.top_block(l);
+        cr.rw.set_start(blk);
+        if let Some(m) = self.mask {
+            let et = cr.rw.body.ty(m).element_type().clone();
+            let mv = Mem::create(cr, OpData::build(Kind::TensorExtract.name()).operands(&[m, iv]), et);
+            let i = cr.rw.create_with(OpData::build(Kind::ScfIf.name()).operands(&[mv]), &[], |b, o| {
+                let r = b.add_region(o);
+                b.add_region(o);
+                let blk = b.add_block(r, &[]);
+                let y = b.create(OpData::build(Kind::ScfYield.name()), &[]);
+                b.insert(y, blk, None);
+            });
+            let then = cr.rw.body.top_block(i);
+            cr.rw.set_start(then);
+        }
+    }
+
+    /// `LoadConverter::rewriteGather`。
+    fn load(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, memref: ValueId) -> bool {
+        let b = &*cr.rw.body;
+        let rt = b.ty(b.res(op, 0)).clone();
+        let shape = rt.dims().unwrap_or_default();
+        let elem = rt.element_type().clone();
+        let mask = NoTc::mask(b, op, true);
+        let other = NoTc::other(b, op);
+        let atype = Mem::memref(&shape, elem, None);
+        let alloc = Mem::create(cr, OpData::build(Kind::MemrefAlloc.name()).with("operandSegmentSizes", dense_i32(&[0, 0])), atype.clone());
+        if let Some(x) = other {
+            NoTc::fill(cr, x, alloc);
+        }
+        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, op, mask.clone());
+        let tv = Mem::create(cr, OpData::build(Kind::BufferizationToTensor.name()).operands(&[alloc]).with("restrict", Attribute::Unit).with("writable", Attribute::Unit), rt);
+        cr.replace_values(op, &[tv]);
+        self.enter(cr, l, iv);
+        let elt = Mem::create(cr, OpData::build(Kind::TensorExtract.name()).operands(&[offset, iv]), Type::Index);
+        let mut src = self.element(cr, memref, elt);
+        let rank = self.sizes.len();
+        let ones = vec![Ofr::V(step); rank];
+        if let Some(mut dims) = mask {
+            dims[self.dim] = sizes[self.dim];
+            sizes = dims;
+            let zeros = vec![Ofr::V(lb); rank];
+            let sty = cr.rw.body[src].ty.clone();
+            src = Mem::create(cr, Mem::sliced(Kind::MemrefSubview.name(), src, [&zeros, &sizes, &ones]), Mem::subview_type_strided(&sty, &zeros, &sizes, &ones));
+        }
+        let mut at = vec![Ofr::V(lb); rank];
+        at[self.dim] = Ofr::V(iv);
+        let dst = Mem::create(cr, Mem::sliced(Kind::MemrefSubview.name(), alloc, [&at, &sizes, &ones]), Mem::subview_type_strided(&atype, &at, &sizes, &ones));
+        cr.rw.create(OpData::build(Kind::MemrefCopy.name()).operands(&[src, dst]), &[]);
+        true
+    }
+
+    /// `StoreConverter::rewriteScatter`。
+    fn store(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, memref: ValueId, value: ValueId) -> bool {
+        let mask = NoTc::mask(cr.rw.body, op, false);
+        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, op, mask.clone());
+        let _ = l;
+        self.enter(cr, l, iv);
+        let elt = Mem::create(cr, OpData::build(Kind::TensorExtract.name()).operands(&[offset, iv]), Type::Index);
+        let rank = self.sizes.len();
+        let mut at = vec![Ofr::V(lb); rank];
+        at[self.dim] = Ofr::V(iv);
+        if let Some(mut dims) = mask.clone() {
+            dims[self.dim] = sizes[self.dim];
+            sizes = dims;
+        }
+        let ones = vec![Ofr::V(step); rank];
+        let vt = cr.rw.body.ty(value).clone();
+        let st = Type::tensor(&sizes.iter().map(|d| d.int().unwrap_or(Dim::DYNAMIC)).collect::<Vec<_>>(), vt.element_type().clone());
+        let slice = Mem::create(cr, Mem::sliced(Kind::TensorExtractSlice.name(), value, [&at, &sizes, &ones]), st);
+        let mut dst = self.element(cr, memref, elt);
+        if mask.is_some() {
+            let zeros = vec![Ofr::V(lb); rank];
+            let dty = cr.rw.body[dst].ty.clone();
+            dst = Mem::create(cr, Mem::sliced(Kind::MemrefSubview.name(), dst, [&zeros, &sizes, &ones]), Mem::subview_type_strided(&dty, &zeros, &sizes, &ones));
+        }
+        cr.rw.create(OpData::build(Kind::BufferizationMaterializeInDestination.name()).operands(&[slice, dst]).with("writable", Attribute::Unit), &[]);
+        cr.erase(op);
+        true
     }
 }
