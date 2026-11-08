@@ -6,7 +6,6 @@
 use mlirformat::{Attribute, Dim, Error, Shaped, ShapedKind, StridedLayout, Type};
 use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
 
-use super::arith_to_linalg::Stamp;
 use crate::ir::{At, Cursor, dense_i32, dense_i64, dense_values};
 use crate::pass::ofr::Ofr;
 use crate::pass::window::{StrideKind, Tptr, UNBOUNDED, Window};
@@ -122,7 +121,6 @@ impl WithTc {
     fn make_tptr(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let t = Tptr::of(cr.rw.body, op);
         let Ok(plan) = Window::plan(cr.rw.body, &t) else { return false };
-        let s = Stamp::new(cr, op);
         let base = o[0][0];
         let rank = t.sizes.len();
         let s0 = plan.strides[0];
@@ -137,7 +135,6 @@ impl WithTc {
             let sizes = vec![Ofr::idx(UNBOUNDED); rank];
             Mem::create(cr, Mem::sliced(Kind::MemrefReinterpretCast.name(), base, [&[Ofr::idx(0)], &sizes, &strides]), ty)
         };
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -147,7 +144,6 @@ impl WithTc {
         if !Mem::scalar_gather(cr.rw.body, op) {
             return false;
         }
-        let s = Stamp::new(cr, op);
         let ptr = cr.rw.body.opd(op, 0);
         let mut off = cr.rw.body.opd(op, 1);
         if !matches!(cr.rw.body.ty(off), Type::Index) {
@@ -157,7 +153,6 @@ impl WithTc {
         let rt = Mem::memref(&[UNBOUNDED], elem.clone(), Some(StridedLayout { strides: vec![1], offset: 0 }));
         let root = Mem::create(cr, Mem::sliced(Kind::MemrefReinterpretCast.name(), o[0][0], [&[Ofr::idx(0)], &[Ofr::idx(UNBOUNDED)], &[Ofr::idx(1)]]), rt);
         let v = Mem::create(cr, OpData::build(Kind::MemrefLoad.name()).operands(&[root, off]), elem);
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -182,7 +177,6 @@ impl NoTc {
         let elem = tt.element_type().clone();
         let mask = Self::mask(b, op, true);
         let other = Self::other(b, op);
-        let s = Stamp::new(cr, op);
         let root = o[0][0];
         let offsets = Mem::offsets(cr, op, &plan);
         let (dims, full) = Self::dims(cr.rw.body, mask, &shape);
@@ -205,7 +199,6 @@ impl NoTc {
         }
         cr.structured(Kind::LinalgCopy.name(), &[src], &[dst], &[], Vec::new(), &mut |_, a| vec![a[0]]);
         let tv = Mem::create(cr, OpData::build(Kind::BufferizationToTensor.name()).operands(&[alloc]).with("restrict", Attribute::Unit).with("writable", Attribute::Unit), tt);
-        s.apply(cr, op);
         cr.replace_values(op, &[tv]);
         true
     }
@@ -223,7 +216,6 @@ impl NoTc {
         let vt = b.ty(value).clone();
         let shape = vt.dims().unwrap_or_default();
         let mask = Self::mask(b, op, false);
-        let s = Stamp::new(cr, op);
         let root = o[0][0];
         let offsets = Mem::offsets(cr, op, &plan);
         let (dims, full) = Self::dims(cr.rw.body, mask, &shape);
@@ -237,7 +229,6 @@ impl NoTc {
         let rty = cr.rw.body[root].ty.clone();
         let dst = Mem::create(cr, Mem::sliced(Kind::MemrefSubview.name(), root, [&offsets, &dims, &ones]), Mem::subview_type(&rty, &offsets, &dims));
         cr.rw.create(OpData::build(Kind::BufferizationMaterializeInDestination.name()).operands(&[source, dst]).with("writable", Attribute::Unit), &[]);
-        s.apply(cr, op);
         cr.erase(op);
         true
     }

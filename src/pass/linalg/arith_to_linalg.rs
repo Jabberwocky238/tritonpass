@@ -4,7 +4,6 @@
 //! （折叠、常量提到入口），最后 tt.func / tt.return 换成 func.func / func.return。
 //!
 //! 只移植了语料与合同用得到的模式：cat、split、join、mulhiui、argmin / argmax、assert、call 没有（P0 已拒收）。
-use std::collections::BTreeSet;
 
 use mlirformat::{AffineExpr, AffineMap, Attribute, Error, NamedAttr, Scalar, Type};
 use mlirpass::{
@@ -78,41 +77,6 @@ impl Pattern for MinMax {
     }
 }
 
-/// 一个模式新建的 op 都带上被换掉的 op 的位置（C++ 的 `loc`）。
-pub(crate) struct Stamp {
-    block: Option<mlirpass::BlockId>,
-    before: BTreeSet<OpId>,
-}
-
-impl Stamp {
-    pub(crate) fn new(cr: &Cr<'_, '_, '_>, op: OpId) -> Self {
-        let block = cr.rw.body[op].parent;
-        Self { block, before: block.map(|b| cr.rw.body.ops(b).collect()).unwrap_or_default() }
-    }
-
-    fn deep(b: &mut Body<'_>, op: OpId, loc: &Option<mlirformat::Str<'_>>) {
-        if b[op].loc.is_none() {
-            b[op].loc = loc.clone().map(|l| l.into_owned().into());
-        }
-        for r in b[op].regions.clone() {
-            for blk in b[r].blocks.clone() {
-                for o in b.block_ops(blk) {
-                    Self::deep(b, o, loc);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn apply(self, cr: &mut Cr<'_, '_, '_>, op: OpId) {
-        let Some(block) = self.block else { return };
-        let loc = cr.rw.body[op].loc.clone();
-        for o in cr.rw.body.block_ops(block) {
-            if !self.before.contains(&o) {
-                Self::deep(cr.rw.body, o, &loc);
-            }
-        }
-    }
-}
 
 /// 建 linalg / tensor op 的小工具。
 struct L;
@@ -160,18 +124,15 @@ struct Tt;
 impl Tt {
     #[convert("tt.splat")]
     fn splat(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let t = L::rty(cr, op);
         let init = cr.empty(&L::dims(&t), t.element_type().clone(), &[]);
         let f = L::fill(cr, o[0][0], init);
-        s.apply(cr, op);
         cr.replace_values(op, &[f]);
         true
     }
 
     #[convert("tt.unsplat")]
     fn unsplat(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let src = o[0][0];
         let rank = L::dims(&L::ty(cr, src)).len();
         let mut operands = vec![src];
@@ -181,7 +142,6 @@ impl Tt {
         }
         let rt = L::rty(cr, op);
         let e = cr.rw.create(OpData::build(Kind::TensorExtract.name()).operands(&operands), &[rt]);
-        s.apply(cr, op);
         let ev = cr.rw.body[e].results[0];
         cr.replace_values(op, &[ev]);
         true
@@ -189,7 +149,6 @@ impl Tt {
 
     #[convert("tt.broadcast")]
     fn broadcast(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let src = o[0][0];
         let (st, rt) = (L::ty(cr, src), L::rty(cr, op));
         let (sd, rd) = (L::dims(&st), L::dims(&rt));
@@ -200,7 +159,6 @@ impl Tt {
         let g = cr.generic(&[rt.clone()], &[src], &[init], &maps, &L::par(rd.len()), &mut |_, a| vec![a[0]]);
         let bdims: Vec<i64> = (0..sd.len()).filter(|i| rd[*i] != sd[*i]).map(|i| i as i64).collect();
         cr.rw.body[g].set("broadcastDims", dense_i64(&bdims));
-        s.apply(cr, op);
         let gv = cr.rw.body[g].results[0];
         cr.replace_values(op, &[gv]);
         true
@@ -208,7 +166,6 @@ impl Tt {
 
     #[convert("tt.expand_dims")]
     fn expand_dims(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let src = o[0][0];
         let rank = L::dims(&L::ty(cr, src)).len() as i64;
         let axis = cr.rw.body.int_attr(op, "axis").unwrap_or(0) as i64;
@@ -225,14 +182,12 @@ impl Tt {
         }
         let rt = L::rty(cr, op);
         let e = Self::expand(cr, src, &groups, rt);
-        s.apply(cr, op);
         cr.replace_values(op, &[e]);
         true
     }
 
     #[convert("tt.trans")]
     fn trans(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let src = o[0][0];
         let st = L::ty(cr, src);
         let sd = L::dims(&st);
@@ -250,7 +205,6 @@ impl Tt {
         let et = st.element_type().clone();
         let init = cr.empty(&shape, et.clone(), &[]);
         let t = cr.structured("linalg.transpose", &[src], &[init], &[Type::tensor(&shape, et)], vec![("permutation", dense_i64(&perm))], &mut |_, a| vec![a[0]]);
-        s.apply(cr, op);
         let tv = cr.rw.body[t].results[0];
         cr.replace_values(op, &[tv]);
         true
@@ -258,7 +212,6 @@ impl Tt {
 
     #[convert("tt.make_range")]
     fn make_range(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let rt = L::rty(cr, op);
         let et = rt.element_type().clone();
         let start = cr.rw.body.int_attr(op, "start").unwrap_or(0);
@@ -274,7 +227,6 @@ impl Tt {
             }
             vec![r]
         });
-        s.apply(cr, op);
         let gv = cr.rw.body[g].results[0];
         cr.replace_values(op, &[gv]);
         true
@@ -286,37 +238,31 @@ impl Tt {
         if matches!(rt.element_type(), Type::Extended(e) if e.name == "tt.ptr") {
             return false;
         }
-        let s = Stamp::new(cr, op);
         let src = cr.rw.body[op].operands[0];
         let v = cr.op1(Kind::ArithBitcast.name(), &[src], rt);
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
 
     #[convert("tt.fp_to_fp")]
     fn fp_to_fp(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let src = cr.rw.body[op].operands[0];
         let rt = L::rty(cr, op);
         let w = |t: &Type<'_>| t.element_type().bit_width().unwrap_or(0);
         let k = if w(&L::ty(cr, src)) > w(&rt) { Kind::ArithTruncf } else { Kind::ArithExtf };
         let v = cr.op1(k.name(), &[src], rt);
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
 
     #[convert("tt.clampf")]
     fn clampf(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         // PropagateNan::ALL 是 0xFFFF，NONE 是 0
         let all = cr.rw.body.int_attr(op, "propagateNan").is_some_and(|v| v != 0);
         let (mx, mn) = if all { (Kind::ArithMaximumf, Kind::ArithMinimumf) } else { (Kind::ArithMaxnumf, Kind::ArithMinnumf) };
         let t = L::ty(cr, o[0][0]);
         let a = cr.op1(mx.name(), &[o[0][0], o[1][0]], t.clone());
         let v = cr.op1(mn.name(), &[a, o[2][0]], t);
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -341,17 +287,14 @@ impl Tt {
         if !pure {
             return false;
         }
-        let s = Stamp::new(cr, op);
         let rt = L::rty(cr, op);
         let v = cr.op1(k.name(), &srcs, rt);
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
 
     #[convert("tt.dot")]
     fn dot(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
-        let s = Stamp::new(cr, op);
         let (a, bb, c) = {
             let ops = &cr.rw.body[op].operands;
             (ops[0], ops[1], ops[2])
@@ -381,7 +324,6 @@ impl Tt {
             let p = cr.op1(mul.name(), &[v1, v2], ot.clone());
             vec![cr.op1(add.name(), &[x[2], p], ot)]
         });
-        s.apply(cr, op);
         let mv = cr.rw.body[m].results[0];
         cr.replace_values(op, &[mv]);
         true
@@ -400,7 +342,6 @@ impl Tt {
         }
         let rop = body_ops[0];
         let Some(rk) = b.kind(rop).filter(|k| Reduce::supported(*k)) else { return false };
-        let s = Stamp::new(cr, op);
         let src = o[0][0];
         let st = L::ty(cr, src);
         let et = st.element_type().clone();
@@ -432,7 +373,6 @@ impl Tt {
         if f32_acc {
             v = cr.op1(Kind::ArithTruncf.name(), &[v], rt);
         }
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -445,7 +385,6 @@ impl Tt {
         if od.contains(&mlirformat::Dim::DYNAMIC) {
             return false;
         }
-        let s = Stamp::new(cr, op);
         let v = match Reassoc::for_reshape(&id, &od) {
             Some(groups) if od.len() < id.len() => {
                 let d = OpData::build(Kind::TensorCollapseShape.name()).operands(&[src]).with("reassociation", Reassoc::attr(&groups));
@@ -462,7 +401,6 @@ impl Tt {
                 cr.rw.body[r].results[0]
             }
         };
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -482,13 +420,11 @@ impl Tt {
         let v = cr.rw.body[op].results[0];
         let Some(c) = cr.rw.body.constant(v) else { return false };
         let Some(first) = c.values.first().cloned() else { return false };
-        let s = Stamp::new(cr, op);
         let rt = L::rty(cr, op);
         let et = rt.element_type().clone();
         let k = L::constant(cr, first, &et);
         let init = cr.empty(&L::dims(&rt), et, &[]);
         let f = L::fill(cr, k, init);
-        s.apply(cr, op);
         cr.replace_values(op, &[f]);
         true
     }
@@ -496,11 +432,9 @@ impl Tt {
 
 impl Tt {
     fn one_to_one(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>], k: Kind) -> bool {
-        let s = Stamp::new(cr, op);
         let ops: Vec<ValueId> = o.iter().map(|x| x[0]).collect();
         let t = L::ty(cr, ops[0]);
         let v = cr.op1(k.name(), &ops, t);
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -512,13 +446,11 @@ impl Tt {
     }
 
     fn grid(cr: &mut Cr<'_, '_, '_>, op: OpId, k: Kind) -> bool {
-        let s = Stamp::new(cr, op);
         let axis = cr.rw.body.int_attr(op, "axis").unwrap_or(0);
         let dim = ["<dim x>", "<dim y>", "<dim z>"][axis.clamp(0, 2) as usize];
         let g = cr.rw.create(OpData::build(k.name()).with("dimension", Attribute::dialect("gpu", dim)), &[Type::Index]);
         let gv = cr.rw.body[g].results[0];
         let v = cr.op1(Kind::ArithIndexCast.name(), &[gv], Type::int(32));
-        s.apply(cr, op);
         cr.replace_values(op, &[v]);
         true
     }
@@ -575,7 +507,6 @@ impl ConversionPattern for Elementwise {
         if !Self::mappable(cr.rw.body, op) {
             return false;
         }
-        let s = Stamp::new(cr, op);
         let d = cr.rw.body[op].clone();
         let rts: Vec<Type<'_>> = d.results.iter().map(|r| L::ty(cr, *r)).collect();
         let rank = L::dims(&rts[0]).len() as u32;
@@ -601,7 +532,6 @@ impl ConversionPattern for Elementwise {
             let o = cr.rw.create(data, &ets);
             cr.rw.body[o].results.to_vec()
         });
-        s.apply(cr, op);
         let gv = cr.rw.body[g].results.to_vec();
         cr.replace_values(op, &gv);
         true

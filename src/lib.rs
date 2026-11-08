@@ -23,4 +23,4 @@ pub use pass::*;
 
 // ⚠ mlirpass-macros 的 #[pass] / #[patterns] 展开成 `crate::…`：在根上转出这几个名字。
 #[allow(unused_imports, reason = "给 mlirpass 的宏展开用")]
-pub(crate) use mlirpass::{ConversionPatterns, ConversionRewriter, Lowering, OpId, OptLowering, OptionValue, Options, PassDecl, Run, ValueId};
+pub(crate) use mlirpass::{ConversionPatterns, ConversionRewriter, Lowering, OpId, OptLowering, OptionValue, Options, PassDecl, Pattern, PatternSet, Plain, Rewriter, Run, ValueId};
