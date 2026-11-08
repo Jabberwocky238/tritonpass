@@ -423,6 +423,75 @@ impl PtrAnalysis {
         true
     }
 
+    /// `visitOperandMakeTensorPtr`：块指针的状态（各维尺寸取指向的张量形状，行距、偏移、shape 都 index_cast，偏移乘上行距）。
+    fn visit_make_tensor_ptr(op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+        let order = crate::ir::dense_values(c.body[op].get("order"));
+        if order.is_empty() {
+            return false;
+        }
+        s.source = Some(c.body.opd(op, 0));
+        let rt = c.body.ty(c.body.res(op, 0)).clone();
+        let shape = crate::pointee(&rt).dims().unwrap_or_default();
+        let rank = shape.len();
+        // 操作数：base, shape ×rank, strides ×rank, offsets ×rank
+        let ops = c.body[op].operands.to_vec();
+        for i in 0..rank {
+            s.sizes.push(Ofr::idx(shape[i]));
+            let stride = c.value(Kind::ArithIndexCast, &[ops[1 + rank + i]], Type::Index);
+            s.strides.push(Ofr::V(stride));
+            let offset = c.value(Kind::ArithIndexCast, &[ops[1 + 2 * rank + i]], Type::Index);
+            let scaled = c.binary(Kind::ArithMuli, offset, stride);
+            s.offsets.push(Ofr::V(scaled));
+            let sh = c.value(Kind::ArithIndexCast, &[ops[1 + i]], Type::Index);
+            s.shape.push(Ofr::V(sh));
+        }
+        s.order = order;
+        true
+    }
+
+    /// `rewriteMakeTensorPtrOp`。
+    fn rewrite_make_tensor_ptr(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
+        let mut c = Cursor::before(b, op);
+        let mut st = PtrState::default();
+        if !Self::visit_make_tensor_ptr(op, &mut st, &mut c) {
+            return false;
+        }
+        let t = st.make_tptr(&mut c);
+        let r = c.body.res(op, 0);
+        self.known.insert(r, st);
+        self.ptr_map.insert(r, t);
+        true
+    }
+
+    /// `rewriteAdvanceOp`：新偏移 = index_cast(增量) × 行距 + 原偏移（常量偏移先物化）。
+    fn rewrite_advance(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
+        let mut c = Cursor::before(b, op);
+        let mut st = PtrState::default();
+        let ptr = c.body.opd(op, 0);
+        if !self.visit(ptr, &mut st, &mut c) {
+            return false;
+        }
+        let increments = c.body[op].operands[1..].to_vec();
+        let mut offsets = Vec::new();
+        for ((inc, off), stride) in increments.iter().zip(st.offsets.clone()).zip(st.strides.clone()) {
+            let ov = match off {
+                Ofr::I(v, _) => c.constant(crate::ir::integer(64, i128::from(v)), Type::Index),
+                Ofr::V(v) => v,
+            };
+            let cast = c.value(Kind::ArithIndexCast, &[*inc], Type::Index);
+            let sv = stride.value().expect("块指针的行距是值");
+            let mul = c.binary(Kind::ArithMuli, cast, sv);
+            let add = c.binary(Kind::ArithAddi, mul, ov);
+            offsets.push(Ofr::V(add));
+        }
+        st.offsets = offsets;
+        let t = st.make_tptr(&mut c);
+        let r = c.body.res(op, 0);
+        self.known.insert(r, st);
+        self.ptr_map.insert(r, t);
+        true
+    }
+
     fn rewrite_splat_or_broadcast(&mut self, b: &mut Body<'_>, op: OpId, splat: bool) {
         let rty = b.ty(b.res(op, 0)).clone();
         if !matches!(rty, Type::Shaped(_)) {
@@ -749,12 +818,20 @@ impl PtrAnalysis {
                 self.rewrite_addptr(b, op);
                 false
             }
+            Some(Kind::TtMakeTensorPtr) => {
+                self.rewrite_make_tensor_ptr(b, op);
+                false
+            }
             Some(Kind::TtSplat) => {
                 self.rewrite_splat_or_broadcast(b, op, true);
                 false
             }
             Some(Kind::TtBroadcast) => {
                 self.rewrite_splat_or_broadcast(b, op, false);
+                false
+            }
+            Some(Kind::TtAdvance) => {
+                self.rewrite_advance(b, op);
                 false
             }
             Some(Kind::TtLoad) => self.rewrite_load(b, op),
