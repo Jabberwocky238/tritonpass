@@ -209,6 +209,7 @@ impl Parse for FuncOp<'_> {
         let sym_name = p.sym_name()?;
         p.expect("(")?;
         let entries = p.list(")", |p| {
+            let start = p.here();
             let named = if p.at(b'%') {
                 let name = p.sigil('%')?.into();
                 p.expect(":")?;
@@ -219,6 +220,8 @@ impl Parse for FuncOp<'_> {
             let ty = p.ty()?;
             let attrs = p.opt_dict()?;
             let loc = p.opt_loc()?;
+            // 没写 loc 的参数在 parse_file 下记它起头处的 "文件":行:列（同 func.func、mlir-opt）
+            let loc = p.loc_or_file(loc, start);
             Ok((named.map(|name| BlockArg { name, ty: ty.clone(), loc }), ty, attrs))
         })?;
         let results = if !p.eat("->") {
@@ -1059,5 +1062,79 @@ mod erased {
     pub fn keyword<T: DeserializeOwned>(p: &mut Parser<'_, '_>) -> R<T> {
         let kw = p.ident()?;
         Content::Str(kw.into()).to().or_else(|e| p.err(e.0))
+    }
+}
+
+/// `tt.clampf %x, %min, %max, propagateNan = none attr-dict : T`。`propagateNan` 是 Triton 的 `TT_PropagateNanAttr`（I32EnumAttr，
+/// none = 0、all = 0xFFFF）：值不连续，mlirformat 的枚举（按位置取值）表达不了，生成的那份把它当普通属性、关键字读成了字符串。
+/// 这里按关键字与 `0 : i32` / `65535 : i32` 互换，通用形式里照 MLIR 存整数。
+#[mlir::op("tt.clampf", custom, results(result))]
+pub struct ClampFOp<'a> {
+    #[slot(result)]
+    pub x: Value<'a>,
+    #[slot(result)]
+    pub min: Value<'a>,
+    #[slot(result)]
+    pub max: Value<'a>,
+    #[attr(name = "propagateNan")]
+    pub propagate_nan: Attribute<'a>,
+    pub result: Type<'a>,
+}
+
+/// `TT_PropagateNanAttr` 的两个值。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PropagateNan {
+    None,
+    All,
+}
+
+impl PropagateNan {
+    const TABLE: [(Self, &'static str, i128); 2] = [(Self::None, "none", 0), (Self::All, "all", 0xFFFF)];
+
+    fn of_value(v: i128) -> Option<Self> {
+        Self::TABLE.iter().find(|(_, _, x)| *x == v).map(|(k, _, _)| *k)
+    }
+
+    fn of_keyword(w: &str) -> Option<Self> {
+        Self::TABLE.iter().find(|(_, n, _)| *n == w).map(|(k, _, _)| *k)
+    }
+
+    const fn keyword(self) -> &'static str {
+        Self::TABLE[self as usize].1
+    }
+
+    fn attr(self) -> Attribute<'static> {
+        Attribute::of_int(Self::TABLE[self as usize].2, int_ty(32))
+    }
+}
+
+impl Print for ClampFOp<'_> {
+    fn print(&self, p: &mut Printer<'_, '_>) -> fmt::Result {
+        let Some(nan) = self.propagate_nan.int().ok().and_then(PropagateNan::of_value) else { return self.print_generic(p) };
+        p.op_name(Self::NAME)?;
+        write!(p, " {}, {}, {}, propagateNan = {}", self.x, self.min, self.max, nan.keyword())?;
+        p.attr_dict("", &self.attrs, &[])?;
+        write!(p, " : {}", self.result)?;
+        p.loc(&self.loc)
+    }
+}
+
+impl Parse for ClampFOp<'_> {
+    fn parse(p: &mut Parser<'_, '_>) -> R<Self> {
+        let x = p.value()?;
+        p.expect(",")?;
+        let min = p.value()?;
+        p.expect(",")?;
+        let max = p.value()?;
+        p.expect(",")?;
+        p.expect_lit("propagateNan")?;
+        p.expect("=")?;
+        let w = p.ident()?;
+        let Some(nan) = PropagateNan::of_keyword(w) else { return p.err(format!("`tt.clampf`：propagateNan 只认 none、all，不认「{w}」")) };
+        let attrs = p.opt_dict()?;
+        p.expect(":")?;
+        let result = p.ty()?;
+        let op = ClampFOp { x, min, max, propagate_nan: nan.attr(), result, attrs, loc: p.opt_loc()? };
+        Self::owned(op, p)
     }
 }

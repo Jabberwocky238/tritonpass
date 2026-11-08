@@ -41,6 +41,7 @@ pub fn load_triton(opt: &mut MlirOpt) {
         .inject(tt_hand::DotOp::template())
         .inject(tt_hand::MakeTensorPtrOp::template())
         .inject(tt_hand::MakeTensorDescOp::template())
+        .inject(tt_hand::ClampFOp::template())
         .inject(upstream_hand::WhileOp::template())
         .inject(upstream_hand::AssumeOp::template());
 }
