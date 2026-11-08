@@ -7,7 +7,7 @@
 
 use mlirformat::{AffineExpr, AffineMap, Attribute, Error, FunctionType, NamedAttr, Scalar, Type};
 use mlirpass::{
-    Action, Body, ConversionConfig, ConversionPattern, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, GreedyConfig, Mode, OpData, OpId, Pattern, PatternSet, Rewriter, Run, Trait, ValueId, pass, patterns,
+    Action, Body, ConversionConfig, ConversionPattern, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, GreedyConfig, Mode, OpData, OpId, PatternSet, Rewriter, Run, Trait, ValueId, pass, patterns,
 };
 
 use crate::ir::{dense_i64, dense_values, i64_attr};
@@ -60,22 +60,23 @@ const CMPI_ULT: i128 = 6;
 const CMPI_UGT: i128 = 8;
 
 /// `MinMaxConverter`：cmp 与只用它的 select 换成 min / max（benefit 10）。
-struct MinMax(Kind);
+struct MinMax;
 
-impl Pattern for MinMax {
-    fn name(&self) -> &str {
-        "MinMaxConverter"
+#[patterns]
+impl MinMax {
+    #[rewrite("arith.cmpf", benefit = 10, name = "MinMaxConverterF")]
+    fn cmpf(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Self::convert(rw, op, Kind::ArithCmpf)
     }
 
-    fn root(&self) -> Option<&str> {
-        Some(self.0.name())
+    #[rewrite("arith.cmpi", benefit = 10, name = "MinMaxConverterI")]
+    fn cmpi(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Self::convert(rw, op, Kind::ArithCmpi)
     }
+}
 
-    fn benefit(&self) -> u16 {
-        10
-    }
-
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+impl MinMax {
+    fn convert(rw: &mut Rewriter<'_, '_>, op: OpId, cmp: Kind) -> bool {
         let b = &*rw.body;
         let c = b.res(op, 0);
         let Some(sel) = b[c].uses.single().map(|u| u.op) else { return false };
@@ -83,7 +84,7 @@ impl Pattern for MinMax {
             return false;
         }
         let p = b.int_attr(op, "predicate").unwrap_or(-1);
-        let k = match (self.0, p) {
+        let k = match (cmp, p) {
             (Kind::ArithCmpf, CMPF_OGT | CMPF_OGE) => Kind::ArithMaximumf,
             (Kind::ArithCmpf, CMPF_OLT | CMPF_OLE) => Kind::ArithMinimumf,
             (Kind::ArithCmpi, CMPI_SGT) => Kind::ArithMaxsi,
@@ -104,7 +105,6 @@ impl Pattern for MinMax {
         true
     }
 }
-
 
 /// 建 linalg / tensor op 的小工具。
 struct L;
@@ -1101,7 +1101,7 @@ impl Run for TritonArithToLinalg {
         }
         let region = body[op].regions[0];
         let mut minmax = PatternSet::default();
-        minmax.add(MinMax(Kind::ArithCmpf)).add(MinMax(Kind::ArithCmpi));
+        MinMax::patterns(&mut minmax);
         body.apply_greedily(region, &minmax, &GreedyConfig::default());
         let target = self.target();
         let mut patterns = ConversionPatterns::default();

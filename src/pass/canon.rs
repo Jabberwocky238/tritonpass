@@ -5,7 +5,7 @@
 //!   `ReshapeOp::canonicalize`；
 //! - 内存效应：`tt.load` 读 GlobalMemory（volatile 另有写），没有用处的读是平凡死的。
 use mlirformat::{Attribute, Const, Scalar, Type};
-use mlirpass::{Body, EffectInstance, EffectKind, Fold, Folded, OpData, OpId, OpInterfaces, Pattern, PatternSet, Rewriter, ValueId};
+use mlirpass::{Body, EffectInstance, EffectKind, Fold, Folded, OpData, OpId, OpInterfaces, PatternSet, Rewriter, ValueId};
 
 use crate::ir::dense_values;
 use crate::{Ir, Kind};
@@ -39,7 +39,7 @@ impl OpInterfaces for TtInterfaces {
     }
 
     fn canonicalization_patterns(&self, s: &mut PatternSet) {
-        s.add(MaskedLoad).add(MaskedStore).add(BroadcastSplat).add(BroadcastBroadcast).add(ReshapeCanon);
+        TtPatterns::patterns(s);
         ExpandDimsCanon::patterns(s);
     }
 }
@@ -129,19 +129,14 @@ fn const_mask(b: &Body<'_>, v: ValueId) -> Option<bool> {
     }
 }
 
-/// `load(ptr, splat(1), …)` ⇒ `load(ptr, …)`；`load(ptr, splat(0), other, …)` ⇒ `other`。
-struct MaskedLoad;
+/// tt 的规范化模式（Triton `Ops.cpp` / `Canonicalize.td`）。
+pub struct TtPatterns;
 
-impl Pattern for MaskedLoad {
-    fn name(&self) -> &str {
-        "CanonicalizeMaskedLoadPattern"
-    }
-
-    fn root(&self) -> Option<&str> {
-        Some(Kind::TtLoad.name())
-    }
-
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+#[mlirpass::patterns]
+impl TtPatterns {
+    /// `load(ptr, splat(1), …)` ⇒ `load(ptr, …)`；`load(ptr, splat(0), other, …)` ⇒ `other`。
+    #[rewrite("tt.load", name = "CanonicalizeMaskedLoadPattern")]
+    fn masked_load(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
         let b = &*rw.body;
         if b[op].operands.len() < 2 {
             return false;
@@ -169,21 +164,10 @@ impl Pattern for MaskedLoad {
             true
         }
     }
-}
 
-/// `store(ptr, v, splat(1), …)` ⇒ `store(ptr, v, …)`；`store(ptr, v, splat(0), …)` ⇒ 删掉。
-struct MaskedStore;
-
-impl Pattern for MaskedStore {
-    fn name(&self) -> &str {
-        "CanonicalizeMaskedStorePattern"
-    }
-
-    fn root(&self) -> Option<&str> {
-        Some(Kind::TtStore.name())
-    }
-
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+    /// `store(ptr, v, splat(1), …)` ⇒ `store(ptr, v, …)`；`store(ptr, v, splat(0), …)` ⇒ 删掉。
+    #[rewrite("tt.store", name = "CanonicalizeMaskedStorePattern")]
+    fn masked_store(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
         let b = &*rw.body;
         if b[op].operands.len() < 3 {
             return false;
@@ -205,21 +189,10 @@ impl Pattern for MaskedStore {
         }
         true
     }
-}
 
-/// `broadcast(splat(x))` ⇒ `splat(x)`。
-struct BroadcastSplat;
-
-impl Pattern for BroadcastSplat {
-    fn name(&self) -> &str {
-        "BroadcastSplatPattern"
-    }
-
-    fn root(&self) -> Option<&str> {
-        Some(Kind::TtBroadcast.name())
-    }
-
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+    /// `broadcast(splat(x))` ⇒ `splat(x)`。
+    #[rewrite("tt.broadcast", name = "BroadcastSplatPattern")]
+    fn broadcast_splat(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
         let b = &*rw.body;
         let Some(s) = b.def_of(b.opd(op, 0), Kind::TtSplat) else { return false };
         let x = b.opd(s, 0);
@@ -229,21 +202,10 @@ impl Pattern for BroadcastSplat {
         rw.replace_with(op, d, &[ty]);
         true
     }
-}
 
-/// `broadcast(broadcast(x))` ⇒ `broadcast(x)`。
-struct BroadcastBroadcast;
-
-impl Pattern for BroadcastBroadcast {
-    fn name(&self) -> &str {
-        "BroadcastBroadcastPattern"
-    }
-
-    fn root(&self) -> Option<&str> {
-        Some(Kind::TtBroadcast.name())
-    }
-
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+    /// `broadcast(broadcast(x))` ⇒ `broadcast(x)`。
+    #[rewrite("tt.broadcast", name = "BroadcastBroadcastPattern")]
+    fn broadcast_broadcast(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
         let b = &*rw.body;
         let Some(inner) = b.def_of(b.opd(op, 0), Kind::TtBroadcast) else { return false };
         let x = b.opd(inner, 0);
@@ -253,21 +215,10 @@ impl Pattern for BroadcastBroadcast {
         rw.replace_with(op, d, &[ty]);
         true
     }
-}
 
-/// `ReshapeOp::canonicalize`：reshape(reshape) ⇒ reshape（任一许重排就许）；reshape(splat) ⇒ splat。
-struct ReshapeCanon;
-
-impl Pattern for ReshapeCanon {
-    fn name(&self) -> &str {
-        "ReshapeOp::canonicalize"
-    }
-
-    fn root(&self) -> Option<&str> {
-        Some(Kind::TtReshape.name())
-    }
-
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+    /// `ReshapeOp::canonicalize`：reshape(reshape) ⇒ reshape（任一许重排就许）；reshape(splat) ⇒ splat。
+    #[rewrite("tt.reshape", name = "ReshapeCanonicalize")]
+    fn reshape_canon(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
         let b = &*rw.body;
         if b[op].get("efficient_layout").is_some() {
             return false;
