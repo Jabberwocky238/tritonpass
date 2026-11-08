@@ -6,38 +6,40 @@
 //! 认不出的整个访存原样不动（途中新建的 op 回滚掉）。改写过就在模块上记 `dope.split_row_axis`，再跑一遍 canonicalize。
 use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Error, Type};
-use mlirpass::{Body, OpData, OpId, ValueId, pass};
+use mlirpass::{Body, OpData, OpId, PatternSet, Rewriter, ValueId, pass, patterns};
 
 use super::uniform_lanes::Canon;
-use crate::ir::{Cursor, dense_i32, int, integer};
+use crate::ir::{TtBuilder, dense_i32, int, integer};
 use crate::{Ir, Kind};
 
 const MAX_DEPTH: u32 = 24;
 
 #[pass("triton-split-row-axis", on = "builtin.module", ty = SplitRowAxis)]
 pub fn split_row_axis<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let mut targets = Vec::new();
-    body.walk_post(op, &mut |o| {
-        if matches!(body.kind(o), Some(Kind::TtLoad | Kind::TtStore)) {
-            targets.push(o);
-        }
-    });
-    let mut changed = false;
-    for t in targets {
-        let cp = body.checkpoint();
-        if Split::build(body, t) {
-            body.release(cp);
-            changed = true;
-        } else {
-            body.rollback(cp);
-        }
-    }
-    if changed {
+    let mut set = PatternSet::default();
+    SplitRules::patterns(&mut set);
+    if body.walk_and_apply(op, &set) {
         let root = body.root;
         body[root].set("dope.split_row_axis", Attribute::Unit);
         Canon::run(body, op)?;
     }
     Ok(())
+}
+
+/// 行轴是两个下标之积的读写 ⇒ 三维窗口 + reshape；认不出就回到改写之前（途中建的 op 一并撤掉）。
+pub struct SplitRules;
+
+#[patterns]
+impl SplitRules {
+    #[rewrite("tt.load")]
+    fn split_load(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Split::attempt(rw, op)
+    }
+
+    #[rewrite("tt.store")]
+    fn split_store(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Split::attempt(rw, op)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -59,22 +61,22 @@ struct Constraint {
     bound: ValueId,
 }
 
-struct Splitter<'b, 'a> {
-    c: Cursor<'b, 'a>,
+struct Splitter<'f, 'r, 'a> {
+    c: &'f mut Rewriter<'r, 'a>,
     big_r: i64,
     cc: i64,
     r: i64,
     failed: bool,
 }
 
-impl Splitter<'_, '_> {
+impl Splitter<'_, '_, '_> {
     fn i64c(&mut self, v: i64) -> ValueId {
-        self.c.constant(integer(64, i128::from(v)), int(64))
+        self.c.scalar(integer(64, i128::from(v)), int(64))
     }
 
     fn const_of(&mut self, ty: Type<'static>, v: i64) -> ValueId {
         let w = ty.int_width().map_or(32, |(w, _)| w);
-        self.c.constant(integer(w, i128::from(v)), ty)
+        self.c.scalar(integer(w, i128::from(v)), ty)
     }
 
     fn to_i64(&mut self, s: ValueId) -> ValueId {
@@ -472,8 +474,20 @@ impl Split {
         leaves.push(v);
     }
 
+    fn attempt(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let cp = rw.body.checkpoint();
+        if Self::build(rw, op) {
+            rw.body.release(cp);
+            true
+        } else {
+            rw.body.rollback(cp);
+            false
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
-    fn build(body: &mut Body<'_>, op: OpId) -> bool {
+    fn build(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let body = &*rw.body;
         let is_load = body.is(op, Kind::TtLoad);
         let ptr = body.opd(op, 0);
         let ptr_ty = body.ty(ptr).clone();
@@ -498,7 +512,8 @@ impl Split {
         };
         let base_src = body.opd(base, 0);
         let ptr_elem = ptr_ty.element_type().clone();
-        let mut s = Splitter { c: Cursor::before(body, op), big_r, cc, r: big_r / cc, failed: false };
+        rw.set_before(op);
+        let mut s = Splitter { c: rw, big_r, cc, r: big_r / cc, failed: false };
         let mut row_shape = shape3.clone();
         *row_shape.last_mut().expect("三维") = 1;
         let mut row_offset: Option<ValueId> = None;
@@ -580,7 +595,7 @@ impl Split {
                 return false;
             }
             let mask_ty = Type::tensor(&shape3, int(1));
-            let mut conj = |s: &mut Splitter<'_, '_>, part: ValueId| {
+            let mut conj = |s: &mut Splitter<'_, '_, '_>, part: ValueId| {
                 mask3 = Some(match mask3 {
                     Some(m) => s.c.binary(Kind::ArithAndi, m, part),
                     None => part,
@@ -619,7 +634,7 @@ impl Split {
                     other3 = Some(s.c.value(Kind::TtSplat, &[src], Type::tensor(&shape3, oelem)));
                 } else {
                     let Some(k) = s.c.body.constant(o).filter(|k| k.elements && k.values.windows(2).all(|w| w[0] == w[1])) else { return false };
-                    other3 = Some(s.c.constant(k.values[0], Type::tensor(&shape3, oelem)));
+                    other3 = Some(s.c.scalar(k.values[0], Type::tensor(&shape3, oelem)));
                 }
             }
             let value_ty = s.c.body.ty(s.c.body.res(op, 0)).clone();
@@ -635,7 +650,7 @@ impl Split {
             let l3 = s.c.create(d, &[Type::tensor(&shape3, value_ty.element_type().clone())]);
             let lv = s.c.body.res(l3, 0);
             let reshaped = s.c.value(Kind::TtReshape, &[lv], value_ty);
-            body.replace_op(op, &[reshaped]);
+            s.c.replace_op(op, &[reshaped]);
         } else {
             let value = s.c.body.opd(op, 1);
             let velem = s.c.body.ty(value).element_type().clone();
@@ -649,7 +664,7 @@ impl Split {
                 }
             }
             s.c.create(d, &[]);
-            body.erase(op);
+            s.c.erase_op(op);
         }
         true
     }
