@@ -32,9 +32,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "mlirformat"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f980e5c861e542f66b017bd86b47c549370c6d6edd19fdfb5e7d9c7189c20424"
+checksum = "b8e7ea2e8220f3a8375addf3d0875d4ee5afcf7387b83c063f61d1fe00920d80"
 dependencies = [
  "mlirformat-macros",
  "moremath",
@@ -46,9 +46,9 @@ dependencies = [
 
 [[package]]
 name = "mlirformat-macros"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d321bc31f1662148279ef1f986c5df7374fe8624561dac334f23b6c3c8aae1d6"
+checksum = "4620e9a479c25ee8a83243ef98f79e229c50ddf538c594b11d9b54329d20d1b6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -57,9 +57,9 @@ dependencies = [
 
 [[package]]
 name = "mlirpass"
-version = "0.8.2"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "651d8b3c932b70d3abbd78e19b8bd8510140694294e845c23dc924646cbb03e0"
+checksum = "18e0341ce5a1750d8d70a7150aeb446a613de32a6226301eae9ec526249f253b"
 dependencies = [
  "libm",
  "mlirformat",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "tritonpass"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mlirformat",
  "mlirpass",

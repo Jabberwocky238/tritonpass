@@ -54,7 +54,7 @@ generic printing byte for byte with the C++ implementation these passes were por
 `scripts/fixtures.py`). Two groups: the per-pass lit cases, and 360 TTIR kernels (vLLM, FlagGems, Triton's own tests)
 through the whole pipeline.
 
-`0.1.0`: 362 chunks match exactly; 150 differ, 170 fail, 11 use an option not ported yet. The known gaps:
+`0.1.1` (mlirformat 0.6.3 / mlirpass 0.8.5): 362 chunks match exactly; 150 differ, 170 fail, 11 use an option not ported yet. The known gaps:
 
 - the C++ default `triton-arith-to-linalg` (grid ids as six trailing arguments, `grid-encoding=args`) is not ported;
   every such case is also run with `grid-encoding=gpu`
