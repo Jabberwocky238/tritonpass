@@ -54,13 +54,10 @@ generic printing byte for byte with the C++ implementation these passes were por
 `scripts/fixtures.py`). Two groups: the per-pass lit cases, and 360 TTIR kernels (vLLM, FlagGems, Triton's own tests)
 through the whole pipeline.
 
-`0.1.1` (mlirformat 0.6.3 / mlirpass 0.8.5): 362 chunks match exactly; 150 differ, 170 fail, 11 use an option not ported yet. The known gaps:
-
-- the C++ default `triton-arith-to-linalg` (grid ids as six trailing arguments, `grid-encoding=args`) is not ported;
-  every such case is also run with `grid-encoding=gpu`
-- `tt.call` is not converted to `func.call`
-- `tts.*` and `scf.index_switch` in custom form are not parsed (generic form is)
-- floats are printed as written in the input, not re-printed as `1.000000e+00` (mlirformat)
+Now (mlirformat 0.6.5 / mlirpass 0.8.10): all 699 chunks match exactly. The reference dope-opt (bca398e) is built on
+Triton's LLVM pin 1f126a6d, newer than the 22.1.8 mlirpass follows; the one difference that shows, `scf.for`'s successors
+by static trip count (remove-dead-values keeps fewer loop inits), comes from mlirpass's `scf-for-trip-count` feature,
+which tritonpass turns on.
 
 `FLOOR` in `tests/passes.rs` only goes up.
 

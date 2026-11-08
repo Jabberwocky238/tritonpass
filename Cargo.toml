@@ -14,7 +14,7 @@ exclude = ["third_party/", "tests/", "scripts/"]
 [dependencies]
 mlirformat = { version = "=0.6.5", default-features = false }
 # 0.8 起方言的 fold / 规范化 / 变换按 feature 开关；只开 std 时 canonicalize 几乎什么都不做，要 all-dialects
-mlirpass = { version = "=0.8.9", default-features = false, features = ["std", "all-dialects"] }
+mlirpass = { version = "=0.8.10", default-features = false, features = ["std", "all-dialects", "scf-for-trip-count"] }
 moremath = { version = "=0.2.1", default-features = false }
 
 [lints.clippy]
