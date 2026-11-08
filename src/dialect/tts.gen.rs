@@ -14,6 +14,7 @@ pub struct GatherOp<'a> {
     pub mask: Vec<Value<'a>>,
     #[slot(other_ty)]
     pub other: Vec<Value<'a>>,
+    #[dtype(strip = "tt.ptr")]
     pub ptr_ty: Type<'a>,
     pub offset_ty: Type<'a>,
     #[dtype(i1 = offset_ty)]
@@ -87,6 +88,7 @@ pub struct MakeGatherScatterTensorPtrOp<'a> {
     pub static_strides: Attribute<'a>,
     #[attr(dense = "i64")]
     pub static_offsets: Attribute<'a>,
+    #[dtype(strip = "tt.ptr")]
     pub base_ty: Type<'a>,
     pub gather_scatter_offset_ty: Type<'a>,
     #[dtype(is = index)]
@@ -118,6 +120,7 @@ pub struct MakeTensorPtrOp<'a> {
     pub static_shape: Attribute<'a>,
     #[attr(dense = "i32")]
     pub order: Attribute<'a>,
+    #[dtype(strip = "tt.ptr")]
     pub base_ty: Type<'a>,
     #[dtype(is = index)]
     pub strides_ty: Type<'a>,
@@ -139,6 +142,7 @@ pub struct ScatterOp<'a> {
     pub value: Value<'a>,
     #[slot(mask_ty)]
     pub mask: Vec<Value<'a>>,
+    #[dtype(strip = "tt.ptr")]
     pub ptr_ty: Type<'a>,
     pub offset_ty: Type<'a>,
     pub value_ty: Type<'a>,

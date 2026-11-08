@@ -303,6 +303,7 @@ pub struct AdvanceOp<'a> {
     pub offsets: Vec<Value<'a>>,
     #[dtype(is = i32)]
     pub offsets_ty: Type<'a>,
+    #[dtype(strip = "tt.ptr")]
     pub result: Type<'a>,
 }
 
@@ -457,9 +458,7 @@ pub struct DescriptorGatherOp<'a> {
 /// This operation will be lowered to Nvidia TMA load operation on targets supporting it.
 /// `desc` is a tensor descriptor object.
 /// The destination tensor type and shape must match the descriptor otherwise the result is undefined.
-///
-/// Generic form only (directive `oilist`).
-#[mlir::op("tt.descriptor_load", results(result))]
+#[mlir::op("tt.descriptor_load", format = "$desc `[` $indices `]` oilist( `cacheModifier` `=` $cache | `evictionPolicy` `=` $evict ) attr-dict `:` qualified(type($desc)) `->` type($result)", results(result))]
 pub struct DescriptorLoadOp<'a> {
     #[slot(desc_ty)]
     pub desc: Value<'a>,
@@ -506,9 +505,7 @@ pub struct DescriptorReduceOp<'a> {
 /// `desc_ptr` is a pointer to the TMA descriptor allocated in global memory.
 /// The descriptor block must have 1 row and the indices must be a 1D tensor.
 /// Accordingly, the result is a 2D tensor multiple rows.
-///
-/// Generic form only (directive `operands)`).
-#[mlir::op("tt.descriptor_scatter")]
+#[mlir::op("tt.descriptor_scatter", format = "$desc `[` $x_offsets `,` $y_offset `]` `,` $src attr-dict `:` type($desc) `,` type($x_offsets) `,` type($y_offset) `,` type($src)")]
 pub struct DescriptorScatterOp<'a> {
     #[slot(desc_ty)]
     pub desc: Value<'a>,
@@ -640,7 +637,7 @@ pub struct ExpandDimsOp<'a> {
 /// call an external function $symbol implemented in $libpath/$libname with $args
 /// return $libpath/$libname:$symbol($args...)
 ///
-/// Generic form only (directive `operands`).
+/// Generic form only (directive `operands,`).
 #[mlir::op("tt.extern_elementwise", results(result))]
 pub struct ExternElementwiseOp<'a> {
     #[slot(srcs_ty)]
@@ -757,7 +754,7 @@ pub struct JoinOp<'a> {
 
 /// `tt.load`: Load from a tensor of pointers or from a tensor pointer
 ///
-/// Generic form only (directive `oilist`).
+/// Generic form only (result type `result` inferred in C++).
 #[mlir::op("tt.load", results(result))]
 pub struct LoadOp<'a> {
     #[slot(ptr_ty)]
@@ -811,6 +808,7 @@ pub struct MakeTensorDescOp<'a> {
     pub strides: Vec<Value<'a>>,
     #[attr(int = "i32", default = "1")]
     pub padding: Option<PaddingOption>,
+    #[dtype(strip = "tt.ptr")]
     pub base_ty: Type<'a>,
     #[dtype(is = i32)]
     pub shape_ty: Type<'a>,
@@ -836,6 +834,7 @@ pub struct MakeTensorPtrOp<'a> {
     pub offsets: Vec<Value<'a>>,
     #[attr(dense = "i32")]
     pub order: Attribute<'a>,
+    #[dtype(strip = "tt.ptr")]
     pub base_ty: Type<'a>,
     #[dtype(is = i64)]
     pub shape_ty: Type<'a>,
@@ -843,6 +842,7 @@ pub struct MakeTensorPtrOp<'a> {
     pub strides_ty: Type<'a>,
     #[dtype(is = i32)]
     pub offsets_ty: Type<'a>,
+    #[dtype(strip = "tt.ptr")]
     pub result: Type<'a>,
 }
 
@@ -1021,9 +1021,7 @@ pub struct SplitOp<'a> {
 }
 
 /// `tt.store`: Store by a tensor of pointers or by a tensor pointer
-///
-/// Generic form only (directive `oilist`).
-#[mlir::op("tt.store")]
+#[mlir::op("tt.store", format = "$ptr `,` $value (`,` $mask^)? oilist(`cacheModifier` `=` $cache | `evictionPolicy` `=` $evict) attr-dict `:` type($ptr)")]
 pub struct StoreOp<'a> {
     #[slot(ptr_ty)]
     pub ptr: Value<'a>,
