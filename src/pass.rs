@@ -56,7 +56,7 @@ pub use fold_unit_dims::{ConditionalFoldUnitDims, Fold};
 pub use iota_integers::FoldIotaIntegers;
 pub use lift_cf::{DropDeadExitSwitch, LiftCfToScf};
 pub use loops::{LoopLowerBoundZero, LoopUnitStep, NormalizeLoopIndex};
-pub use ofr::Ofr;
+pub use ofr::{Ofr, OfrBuilder};
 pub use ptr_to_memref::TritonPtrToMemref;
 pub use ptrs::{LowerBoolPtr, ScalarPtr};
 pub use split_row_axis::SplitRowAxis;

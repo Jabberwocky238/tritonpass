@@ -122,9 +122,24 @@ impl<'a> Ir<'a> for Body<'a> {
 pub trait Build<'a> {
     /// `arith.constant` 的 OpData：整数或浮点标量，或（`ty` 是张量时）splat。
     fn constant_data(value: Scalar, ty: &Type<'a>) -> OpData<'a>;
+    /// ⭐ 在 `at` 用一个 mlirpass [`mlirpass::Rewriter`] 建 op（没写位置的新 op 取 `loc`）：`OpBuilder` 定好插入点再交给 `f`。
+    fn build<R>(&mut self, at: At, loc: Option<mlirformat::Str<'a>>, f: impl FnOnce(&mut mlirpass::Rewriter<'_, 'a>) -> R) -> R;
 }
 
 impl<'a> Build<'a> for Body<'a> {
+    fn build<R>(&mut self, at: At, loc: Option<mlirformat::Str<'a>>, f: impl FnOnce(&mut mlirpass::Rewriter<'_, 'a>) -> R) -> R {
+        let mut q = mlirpass::Quiet;
+        let mut rw = mlirpass::Rewriter::new(self, &mut q);
+        match at {
+            At::Before(o) => rw.set_before(o),
+            At::After(o) => rw.set_after(o),
+            At::Start(b) => rw.set_start(b),
+            At::End(b) => rw.set_end(b),
+        }
+        rw.loc = loc;
+        f(&mut rw)
+    }
+
     fn constant_data(value: Scalar, ty: &Type<'a>) -> OpData<'a> {
         let attr: Attribute<'a> = match ty {
             Type::Shaped(_) => Const::splat(value, ty.clone()).into(),
@@ -152,108 +167,13 @@ pub fn float_kind(ty: &Type<'_>) -> Option<FloatKind> {
     }
 }
 
-/// 插入点：某条 op 之前，某块的末尾，或某条 op 之后（`setInsertionPointAfter`：每次都紧挨在它后面）。
+/// 插入点：某条 op 之前，某块的开头 / 末尾，或某条 op 之后（`setInsertionPointAfter`：每次都紧挨在它后面）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At {
     Before(OpId),
+    Start(BlockId),
     End(BlockId),
     After(OpId),
-}
-
-/// 建 op 的游标：插入点 + 新 op 的位置（`loc(...)` 原文）。tritonpass 自己已改用 [`TtBuilder`]（mlirpass `Rewriter`），
-/// 留给 calcc 的 dope-* pass 迁完为止。
-pub struct Cursor<'b, 'a> {
-    pub body: &'b mut Body<'a>,
-    pub at: At,
-    pub loc: Option<mlirformat::Str<'a>>,
-}
-
-impl<'b, 'a> Cursor<'b, 'a> {
-    /// 插在 `op` 之前，带 `op` 的位置。
-    pub fn before(body: &'b mut Body<'a>, op: OpId) -> Self {
-        let loc = body[op].loc.clone();
-        Self { body, at: At::Before(op), loc }
-    }
-
-    /// 插在 `block` 末尾，带给定的位置。
-    pub fn end(body: &'b mut Body<'a>, block: BlockId, loc: Option<mlirformat::Str<'a>>) -> Self {
-        Self { body, at: At::End(block), loc }
-    }
-
-    /// 插进去一条已建好的（脱离的）op。
-    pub fn place(&mut self, o: OpId) -> OpId {
-        match self.at {
-            At::Before(b) => self.body.insert_before(o, b),
-            At::End(blk) => self.body.insert(o, blk, None),
-            At::After(a) => {
-                self.body.insert_after(o, a);
-                // 照 OpBuilder：插完之后插入点在新 op 之后
-                self.at = At::After(o);
-            }
-        }
-        o
-    }
-
-    /// 插在 `block` 的开头（`OpBuilder::atBlockBegin`：之后建的接着排在前面建的后面）。
-    pub fn start(body: &'b mut Body<'a>, block: BlockId, loc: Option<mlirformat::Str<'a>>) -> Self {
-        let at = match body.first_op(block) {
-            Some(first) => At::Before(first),
-            None => At::End(block),
-        };
-        Self { body, at, loc }
-    }
-
-    /// 建一条 op（`data` 的位置换成游标的），插好，返回它。
-    pub fn create(&mut self, mut data: OpData<'a>, types: &[Type<'a>]) -> OpId {
-        data.loc.clone_from(&self.loc);
-        let o = self.body.create(data, types);
-        self.place(o)
-    }
-
-    /// 建一条单结果的 op，返回结果。
-    pub fn value(&mut self, k: Kind, operands: &[ValueId], ty: Type<'a>) -> ValueId {
-        let o = self.create(OpData::build(k.name()).operands(operands), &[ty]);
-        self.body.res(o, 0)
-    }
-
-    /// 带属性的单结果 op。
-    pub fn value_with(&mut self, k: Kind, operands: &[ValueId], attrs: &[(&str, Attribute<'a>)], ty: Type<'a>) -> ValueId {
-        let mut d = OpData::build(k.name()).operands(operands);
-        for (n, a) in attrs {
-            d.set(n, a.clone());
-        }
-        let o = self.create(d, &[ty]);
-        self.body.res(o, 0)
-    }
-
-    /// `arith.constant`。
-    pub fn constant(&mut self, value: Scalar, ty: Type<'a>) -> ValueId {
-        let o = self.create(Body::constant_data(value, &ty), &[ty]);
-        self.body.res(o, 0)
-    }
-
-    /// `arith.constant N : i32`。
-    pub fn i32(&mut self, n: i64) -> ValueId {
-        self.constant(integer(32, i128::from(n)), int(32))
-    }
-
-    /// `arith.cmpi <pred>`。
-    pub fn cmpi(&mut self, pred: mlirformat::arith::CmpIPredicate, l: ValueId, r: ValueId) -> ValueId {
-        let ty = self.body.ty(l).i1_like();
-        self.value_with(Kind::ArithCmpi, &[l, r], &[("predicate", Attribute::of_int(pred as i128, int(64)))], ty)
-    }
-
-    /// 二元 op，结果类型同左操作数。
-    pub fn binary(&mut self, k: Kind, l: ValueId, r: ValueId) -> ValueId {
-        let ty = self.body.ty(l).clone();
-        self.value(k, &[l, r], ty)
-    }
-
-    /// `arith.select`。
-    pub fn select(&mut self, c: ValueId, t: ValueId, f: ValueId) -> ValueId {
-        let ty = self.body.ty(t).clone();
-        self.value(Kind::ArithSelect, &[c, t, f], ty)
-    }
 }
 
 /// ⭐ 在 mlirpass 的 [`Rewriter`] 上建 tt / tts / arith / scf op 的小工具（`OpBuilder` 的那几个便捷构造）：插入点、位置、
@@ -414,48 +334,3 @@ pub fn dense_values(a: Option<&Attribute<'_>>) -> Vec<i64> {
     }
 }
 
-impl<'b, 'a> Cursor<'b, 'a> {
-    /// `scf.for %lb to %ub step %s iter_args(inits)`：区域与入口块建好（归纳变量取 `lb` 的类型，块参数的位置照 MLIR：
-    /// 归纳变量是循环的位置，携带值是初值的位置），块里是空的。
-    pub fn for_loop(&mut self, lb: ValueId, ub: ValueId, step: ValueId, inits: &[ValueId]) -> (OpId, BlockId) {
-        let mut operands = vec![lb, ub, step];
-        operands.extend_from_slice(inits);
-        let tys = self.body.types(inits);
-        let f = self.create(OpData::build(Kind::ScfFor.name()).operands(&operands), &tys);
-        let region = self.body.add_region(f);
-        let mut args: Vec<(Type<'a>, Option<mlirformat::Str<'a>>)> = vec![(self.body.ty(lb).clone(), None)];
-        args.extend(tys.iter().map(|t| (t.clone(), None)));
-        let block = self.body.add_block(region, &args);
-        let ivs = self.body[block].args.to_vec();
-        self.body[ivs[0]].loc.clone_from(&self.loc);
-        for (a, v) in ivs[1..].iter().zip(inits) {
-            let l = match self.body[*v].def {
-                Def::Result(o, _) => self.body[o].loc.clone(),
-                Def::Arg(..) => self.body[*v].loc.clone(),
-            };
-            self.body[*a].loc = l;
-        }
-        (f, block)
-    }
-
-    /// `tts.make_tptr %base to sizes: … , strides: …, offsets: …, shape: …, order: …`。
-    pub fn make_tptr(&mut self, base: ValueId, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr], shape: &[Ofr], order: &[i64], ty: Type<'a>) -> ValueId {
-        let mut operands = vec![base];
-        let dyn_of = |xs: &[Ofr]| xs.iter().filter_map(|x| x.value()).collect::<Vec<_>>();
-        let (s, o, sh) = (dyn_of(strides), dyn_of(offsets), dyn_of(shape));
-        operands.extend(&s);
-        operands.extend(&o);
-        operands.extend(&sh);
-        let statics = |xs: &[Ofr]| xs.iter().map(|x| x.static_value()).collect::<Vec<_>>();
-        let d = OpData::build(Kind::TtsMakeTptr.name())
-            .operands(&operands)
-            .with("operandSegmentSizes", dense_i32(&[1, s.len() as i64, o.len() as i64, sh.len() as i64]))
-            .with("order", dense_i32(order))
-            .with("sizes", dense_i64(sizes))
-            .with("static_offsets", dense_i64(&statics(offsets)))
-            .with("static_shape", dense_i64(&statics(shape)))
-            .with("static_strides", dense_i64(&statics(strides)));
-        let op = self.create(d, &[ty]);
-        self.body.res(op, 0)
-    }
-}
