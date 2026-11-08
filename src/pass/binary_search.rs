@@ -15,18 +15,30 @@ use std::collections::BTreeMap;
 
 use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Error, Type};
-use mlirpass::{Body, Mapping, OpData, OpId, ValueId, pass};
+use mlirpass::{Body, Mapping, OpData, OpId, PatternSet, Rewriter, ValueId, pass, patterns};
 
-use crate::ir::{At, Cursor, i64_attr, int};
+use crate::ir::{TtBuilder, i64_attr, int};
 use crate::{Ir, Kind};
 
 #[pass("triton-binary-search-to-for", on = "builtin.module", ty = BinarySearchToFor)]
 pub fn binary_search_to_for<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let matches: Vec<Match> = body.ops_in(op).into_iter().filter(|o| body.is(*o, Kind::ScfWhile)).filter_map(|o| Match::of(body, o)).collect();
-    for m in matches {
-        m.rewrite(body);
-    }
+    let mut set = PatternSet::default();
+    BinarySearch::patterns(&mut set);
+    body.walk_and_apply(op, &set);
     Ok(())
+}
+
+/// 认得出的二分查找 scf.while ⇒ 有界的 scf.for。
+pub struct BinarySearch;
+
+#[patterns]
+impl BinarySearch {
+    #[rewrite("scf.while")]
+    fn bounded_for(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let Some(m) = Match::of(rw.body, op) else { return false };
+        m.rewrite(rw);
+        true
+    }
 }
 
 /// 常数轮数（R0 是入口实参时）。
@@ -214,20 +226,21 @@ impl Match {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn rewrite(&self, b: &mut Body<'_>) {
+    fn rewrite(&self, rw: &mut Rewriter<'_, '_>) {
         let loop_ = self.loop_;
-        let (init_left, init_right) = (b.opd(loop_, 0), b.opd(loop_, 1));
+        let (init_left, init_right) = (rw.body.opd(loop_, 0), rw.body.opd(loop_, 1));
         let mut consts: BTreeMap<i64, ValueId> = BTreeMap::new();
-        let mut c = Cursor::before(b, loop_);
-        let mut constant = |c: &mut Cursor<'_, '_>, n: i64| *consts.entry(n).or_insert_with(|| c.i32(n));
+        rw.set_before(loop_);
+        let c = &mut *rw;
+        let mut constant = |c: &mut Rewriter<'_, '_>, n: i64| *consts.entry(n).or_insert_with(|| c.i32(n));
         let trip = match (c.body.const_int(init_left), c.body.const_int(init_right)) {
             (Some(lo), Some(hi)) => {
                 let width = hi - lo;
                 let bits = if width > 0 { 128 - width.leading_zeros() } else { 0 };
-                constant(&mut c, i64::from(bits))
+                constant(c, i64::from(bits))
             }
             (Some(0), None) if Self::entry_argument(c.body, init_right).is_some() => {
-                let t = constant(&mut c, CONSTANT_TRIPS);
+                let t = constant(c, CONSTANT_TRIPS);
                 let arg = Self::entry_argument(c.body, init_right).unwrap_or(0);
                 Self::add_precondition(c.body, loop_, arg, (1 << CONSTANT_TRIPS) - 1);
                 t
@@ -235,54 +248,53 @@ impl Match {
             _ => {
                 let non_empty = c.cmpi(CmpIPredicate::slt, init_left, init_right);
                 let width = c.binary(Kind::ArithSubi, init_right, init_left);
-                let zero = constant(&mut c, 0);
+                let zero = constant(c, 0);
                 let width_positive = c.cmpi(CmpIPredicate::sgt, width, zero);
-                let one = constant(&mut c, 1);
+                let one = constant(c, 1);
                 let mut remaining = c.binary(Kind::ArithMaxsi, width, one);
-                let mut log2 = constant(&mut c, 0);
+                let mut log2 = constant(c, 0);
                 for shift in [16, 8, 4, 2, 1] {
-                    let k = constant(&mut c, 1 << shift);
+                    let k = constant(c, 1 << shift);
                     let big = c.cmpi(CmpIPredicate::sge, remaining, k);
-                    let s = constant(&mut c, shift);
+                    let s = constant(c, shift);
                     let shifted = c.binary(Kind::ArithShrsi, remaining, s);
                     remaining = c.select(big, shifted, remaining);
-                    let s2 = constant(&mut c, shift);
-                    let z = constant(&mut c, 0);
+                    let s2 = constant(c, shift);
+                    let z = constant(c, 0);
                     let inc = c.select(big, s2, z);
                     log2 = c.binary(Kind::ArithAddi, log2, inc);
                 }
-                let one = constant(&mut c, 1);
+                let one = constant(c, 1);
                 let bit_length = c.binary(Kind::ArithAddi, log2, one);
-                let thirty_two = constant(&mut c, 32);
+                let thirty_two = constant(c, 32);
                 let t = c.select(width_positive, bit_length, thirty_two);
-                let z = constant(&mut c, 0);
+                let z = constant(c, 0);
                 c.select(non_empty, t, z)
             }
         };
-        let one = constant(&mut c, 1);
+        let one = constant(c, 1);
         let last_index = c.binary(Kind::ArithSubi, init_right, one);
-        let zero = constant(&mut c, 0);
-        let one = constant(&mut c, 1);
-        drop(c);
-
+        let zero = constant(c, 0);
+        let one = constant(c, 1);
+        let b = &*rw.body;
         let after = b.entry(loop_, 1);
         let y = b.terminator(after).expect("after 有 yield");
         let left_if = b.def_of(b.opd(y, 0), Kind::ScfIf);
         let right_if = b.def_of(b.opd(y, 1), Kind::ScfIf);
         // scf.for (0, trip, 1) iter_args(init_left, init_right)
         let i32t = int(32);
-        let mut d = OpData::build(Kind::ScfFor.name()).operands(&[zero, trip, one, init_left, init_right]);
-        d.loc.clone_from(&b[loop_].loc);
-        let for_op = b.create(d, &[i32t.clone(), i32t.clone()]);
-        b.insert_before(for_op, loop_);
-        let region = b.add_region(for_op);
-        let block = b.add_block(region, &[(i32t.clone(), None), (i32t.clone(), None), (i32t.clone(), None)]);
         let loc = b[loop_].loc.clone();
-        for a in b[block].args.clone() {
-            b[a].loc.clone_from(&loc);
-        }
-        let (left, right) = (b[block].args[1], b[block].args[2]);
-        let mut c = Cursor { body: b, at: At::End(block), loc: loc.clone() };
+        let d = OpData::build(Kind::ScfFor.name()).operands(&[zero, trip, one, init_left, init_right]);
+        let args = vec![(i32t.clone(), loc.clone()); 3];
+        rw.set_before(loop_);
+        let for_op = rw.create_with(d, &[i32t.clone(), i32t.clone()], |b, o| {
+            let region = b.add_region(o);
+            b.add_block(region, &args);
+        });
+        let block = rw.body.top_block(for_op);
+        let (left, right) = (rw.body[block].args[1], rw.body[block].args[2]);
+        rw.set_end(block);
+        let c = &mut *rw;
         let active = c.cmpi(CmpIPredicate::slt, left, right);
         let mut map = Mapping::default();
         map.map(c.body[after].args[0], left);
@@ -292,12 +304,11 @@ impl Match {
         for &o in &ops[..ops.len() - 1] {
             if Some(o) == left_if || Some(o) == right_if {
                 if !map.values.contains_key(&c.body.res(o, 0)) {
-                    Self::flatten_if(&mut c, o, &mut map);
+                    Self::flatten_if(c, o, &mut map);
                 }
                 continue;
             }
-            let cloned = c.body.clone_op(o, &mut map);
-            c.place(cloned);
+            let cloned = c.clone(o, &mut map);
             if self.has_load && c.body[o].results.len() == 1 && c.body.res(o, 0) == self.mid {
                 let r = c.body.res(cloned, 0);
                 let clamped = c.binary(Kind::ArithMinsi, r, last_index);
@@ -312,19 +323,18 @@ impl Match {
         let kept_left = c.select(active, new_left, left);
         let kept_right = c.select(active, new_right, right);
         c.create(OpData::build(Kind::ScfYield.name()).operands(&[kept_left, kept_right]), &[]);
-        let results = b[for_op].results.to_vec();
-        b.replace_op(loop_, &results);
+        let results = c.body[for_op].results.to_vec();
+        c.replace_op(loop_, &results);
     }
 
     /// scf.if 两支的内容（不含终结符）克隆到游标处，结果换成 select。
-    fn flatten_if(c: &mut Cursor<'_, '_>, i: OpId, map: &mut Mapping) {
+    fn flatten_if(c: &mut Rewriter<'_, '_>, i: OpId, map: &mut Mapping) {
         let iloc = c.body[i].loc.clone();
         for r in 0..2 {
             let blk = c.body.entry(i, r);
             let ops = c.body.block_ops(blk);
             for &o in &ops[..ops.len() - 1] {
-                let cl = c.body.clone_op(o, map);
-                c.place(cl);
+                c.clone(o, map);
             }
         }
         let cond = map.get(c.body.opd(i, 0));
