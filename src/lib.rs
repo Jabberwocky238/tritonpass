@@ -17,7 +17,7 @@ mod pass;
 
 pub use dialect::{TtDialect, TtgDialect, TtsDialect, load_triton, pointee};
 pub use grid::GridEncoding;
-pub use ir::{At, Build, Cursor, DYNAMIC, Ir, dense_i32, dense_i64, dense_values, float, float_kind, i64_attr, int, integer};
+pub use ir::{At, Build, Cursor, DYNAMIC, TtBuilder, Ir, dense_i32, dense_i64, dense_values, float, float_kind, i64_attr, int, integer};
 pub use kind::{Kind, Namespace};
 pub use pass::*;
 

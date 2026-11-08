@@ -255,6 +255,106 @@ impl<'b, 'a> Cursor<'b, 'a> {
     }
 }
 
+/// ⭐ 在 mlirpass 的 [`Rewriter`] 上建 tt / tts / arith / scf op 的小工具（`OpBuilder` 的那几个便捷构造）：插入点、位置、
+/// 监听都是 rewriter 的（新 op 没写位置的取 `rw.loc`，即被改写的 op 的位置）。`#[rewrite]` 模式里直接对 `rw` 调。
+pub trait TtBuilder<'a> {
+    /// 建一条单结果的 op，返回结果。
+    fn value(&mut self, k: Kind, operands: &[ValueId], ty: Type<'a>) -> ValueId;
+    /// 带属性的单结果 op。
+    fn value_with(&mut self, k: Kind, operands: &[ValueId], attrs: &[(&str, Attribute<'a>)], ty: Type<'a>) -> ValueId;
+    /// `arith.constant`（标量，或 `ty` 是张量时 splat）。
+    fn scalar(&mut self, value: Scalar, ty: Type<'a>) -> ValueId;
+    /// `arith.constant N : i32`。
+    fn i32(&mut self, n: i64) -> ValueId;
+    /// `arith.cmpi <pred>`。
+    fn cmpi(&mut self, pred: mlirformat::arith::CmpIPredicate, l: ValueId, r: ValueId) -> ValueId;
+    /// 二元 op，结果类型同左操作数。
+    fn binary(&mut self, k: Kind, l: ValueId, r: ValueId) -> ValueId;
+    /// `arith.select`。
+    fn select(&mut self, c: ValueId, t: ValueId, f: ValueId) -> ValueId;
+    /// `scf.for %lb to %ub step %s iter_args(inits)`（`scf::ForOp::build`）：区域与入口块建好，归纳变量取 `lb` 的类型、
+    /// 循环的位置，携带值取各初值的位置；块里是空的。
+    fn for_loop(&mut self, lb: ValueId, ub: ValueId, step: ValueId, inits: &[ValueId]) -> (OpId, BlockId);
+    /// `tts.make_tptr %base to sizes: … , strides: …, offsets: …, shape: …, order: …`。
+    #[expect(clippy::too_many_arguments, reason = "tts.make_tptr 的各段")]
+    fn make_tptr(&mut self, base: ValueId, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr], shape: &[Ofr], order: &[i64], ty: Type<'a>) -> ValueId;
+}
+
+impl<'a> TtBuilder<'a> for mlirpass::Rewriter<'_, 'a> {
+    fn value(&mut self, k: Kind, operands: &[ValueId], ty: Type<'a>) -> ValueId {
+        let o = self.create(OpData::build(k.name()).operands(operands), &[ty]);
+        self.body.res(o, 0)
+    }
+
+    fn value_with(&mut self, k: Kind, operands: &[ValueId], attrs: &[(&str, Attribute<'a>)], ty: Type<'a>) -> ValueId {
+        let mut d = OpData::build(k.name()).operands(operands);
+        for (n, a) in attrs {
+            d.set(n, a.clone());
+        }
+        let o = self.create(d, &[ty]);
+        self.body.res(o, 0)
+    }
+
+    fn scalar(&mut self, value: Scalar, ty: Type<'a>) -> ValueId {
+        let o = self.create(Body::constant_data(value, &ty), &[ty]);
+        self.body.res(o, 0)
+    }
+
+    fn i32(&mut self, n: i64) -> ValueId {
+        self.scalar(integer(32, i128::from(n)), int(32))
+    }
+
+    fn cmpi(&mut self, pred: mlirformat::arith::CmpIPredicate, l: ValueId, r: ValueId) -> ValueId {
+        let ty = self.body.ty(l).i1_like();
+        self.value_with(Kind::ArithCmpi, &[l, r], &[("predicate", Attribute::of_int(pred as i128, int(64)))], ty)
+    }
+
+    fn binary(&mut self, k: Kind, l: ValueId, r: ValueId) -> ValueId {
+        let ty = self.body.ty(l).clone();
+        self.value(k, &[l, r], ty)
+    }
+
+    fn select(&mut self, c: ValueId, t: ValueId, f: ValueId) -> ValueId {
+        let ty = self.body.ty(t).clone();
+        self.value(Kind::ArithSelect, &[c, t, f], ty)
+    }
+
+    fn for_loop(&mut self, lb: ValueId, ub: ValueId, step: ValueId, inits: &[ValueId]) -> (OpId, BlockId) {
+        let mut operands = vec![lb, ub, step];
+        operands.extend_from_slice(inits);
+        let tys = self.body.types(inits);
+        let iv: Vec<(Type<'a>, Option<mlirformat::Str<'a>>)> = vec![(self.body.ty(lb).clone(), self.loc.clone())];
+        let carried = inits.iter().zip(&tys).map(|(v, t)| (t.clone(), self.body.value_loc(*v)));
+        let args: Vec<_> = iv.into_iter().chain(carried).collect();
+        let f = self.create_with(OpData::build(Kind::ScfFor.name()).operands(&operands), &tys, |b, o| {
+            let r = b.add_region(o);
+            b.add_block(r, &args);
+        });
+        let block = self.body.top_block(f);
+        (f, block)
+    }
+
+    fn make_tptr(&mut self, base: ValueId, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr], shape: &[Ofr], order: &[i64], ty: Type<'a>) -> ValueId {
+        let mut operands = vec![base];
+        let dyn_of = |xs: &[Ofr]| xs.iter().filter_map(|x| x.value()).collect::<Vec<_>>();
+        let (s, o, sh) = (dyn_of(strides), dyn_of(offsets), dyn_of(shape));
+        operands.extend(&s);
+        operands.extend(&o);
+        operands.extend(&sh);
+        let statics = |xs: &[Ofr]| xs.iter().map(|x| x.static_value()).collect::<Vec<_>>();
+        let d = OpData::build(Kind::TtsMakeTptr.name())
+            .operands(&operands)
+            .with("operandSegmentSizes", dense_i32(&[1, s.len() as i64, o.len() as i64, sh.len() as i64]))
+            .with("order", dense_i32(order))
+            .with("sizes", dense_i64(sizes))
+            .with("static_offsets", dense_i64(&statics(offsets)))
+            .with("static_shape", dense_i64(&statics(shape)))
+            .with("static_strides", dense_i64(&statics(strides)));
+        let op = self.create(d, &[ty]);
+        self.body.res(op, 0)
+    }
+}
+
 /// MLIR 印 i64 的 IntegerAttr 不带类型（`25` 而不是 `25 : i64`）：`I64ArrayAttr` 的元素就是这样。
 pub fn i64_attr(v: i64) -> Attribute<'static> {
     Attribute::Int { lit: v.to_string().into(), ty: None }
