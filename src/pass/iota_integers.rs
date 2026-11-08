@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 
 use mlirformat::arith::{CmpFPredicate, CmpIPredicate};
 use mlirformat::{Attribute, Error, FloatKind, Type};
-use mlirpass::{Body, OpId, ValueId, pass};
+use mlirpass::{Body, OpId, PatternSet, Rewriter, ValueId, pass, patterns};
 
 use super::uniform_lanes::Canon;
-use crate::ir::{Cursor, float, int};
+use crate::ir::{TtBuilder, float, int};
 use crate::{Ir, Kind};
 
 const MAX_DEPTH: u32 = 24;
@@ -18,24 +18,31 @@ const MAX_STEPS: usize = 16;
 
 #[pass("triton-fold-iota-integers", on = "builtin.module", ty = FoldIotaIntegers)]
 pub fn fold_iota_integers<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let mut selects = Vec::new();
-    body.walk_post(op, &mut |o| {
-        if body.is(o, Kind::ArithSelect) && matches!(body.ty(body.opd(o, 0)), Type::Shaped(_)) && matches!(body.ty(body.res(o, 0)).element_type(), Type::Float(_)) {
-            selects.push(o);
-        }
-    });
-    let mut changed = false;
-    for s in selects {
-        let mut f = Folder { c: Cursor::before(body, s), memo: BTreeMap::new() };
-        if let Some(next) = f.rewrite_select(s) {
-            body.replace_op(s, &[next]);
-            changed = true;
-        }
-    }
-    if changed {
+    let mut set = PatternSet::default();
+    IotaRules::patterns(&mut set);
+    if body.walk_and_apply(op, &set) {
         Canon::run(body, op)?;
     }
     Ok(())
+}
+
+/// 条件是 arange 派生的整型张量比较、结果是浮点的 select ⇒ 常量张量与铺开的标量比较（分析途中建的 op 改写不成也留着，同 C++）。
+pub struct IotaRules;
+
+#[patterns]
+impl IotaRules {
+    #[rewrite("arith.select")]
+    fn fold_select_condition(rw: &mut Rewriter<'_, '_>, s: OpId) -> bool {
+        let b = &*rw.body;
+        if !matches!(b.ty(b.opd(s, 0)), Type::Shaped(_)) || !matches!(b.ty(b.res(s, 0)).element_type(), Type::Float(_)) {
+            return false;
+        }
+        rw.set_before(s);
+        let mut f = Folder { c: rw, memo: BTreeMap::new() };
+        let Some(next) = f.rewrite_select(s) else { return false };
+        rw.replace_op(s, &[next]);
+        true
+    }
 }
 
 /// 只取决于一根轴的一维常量向量。
@@ -65,12 +72,12 @@ impl Affine {
     }
 }
 
-struct Folder<'b, 'a> {
-    c: Cursor<'b, 'a>,
+struct Folder<'f, 'r, 'a> {
+    c: &'f mut Rewriter<'r, 'a>,
     memo: BTreeMap<ValueId, Option<Affine>>,
 }
 
-impl Folder<'_, '_> {
+impl Folder<'_, '_, '_> {
     fn i32_tensor(t: &Type<'_>) -> bool {
         let Some(d) = t.dims() else { return false };
         matches!(t, Type::Shaped(_)) && matches!(t.element_type(), Type::Integer { width: 32, .. }) && d.iter().all(|x| *x >= 0) && d.iter().product::<i64>() <= MAX_ELEMENTS
@@ -225,7 +232,7 @@ impl Folder<'_, '_> {
 
     /// f32 的 splat 常量张量（形状同 `like`）。
     fn f32_splat(&mut self, value: f64, shape: &[i64]) -> ValueId {
-        self.c.constant(float(FloatKind::F32, value), Type::tensor(shape, Type::Float(FloatKind::F32)))
+        self.c.scalar(float(FloatKind::F32, value), Type::tensor(shape, Type::Float(FloatKind::F32)))
     }
 
     fn cmpf(&mut self, pred: CmpFPredicate, l: ValueId, r: ValueId) -> ValueId {
