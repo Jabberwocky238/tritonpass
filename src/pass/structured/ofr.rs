@@ -265,8 +265,10 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> OfrBuilder for mlirpass::Rewriter<'
                     shape_values.push(self.index(*d));
                 }
                 let st = Type::tensor(&[dims.len() as i64], Type::Index);
-                let shape = self.value(Kind::TensorFromElements, &shape_values, st);
-                return Ofr::V(self.value(Kind::TtReshape, &[v, shape], tty));
+                // C++ 的 `ReshapeOp::create(b, loc, ty, v, shapeTensor)`：shapeTensor 落在 `bool allowReorder` 上（非空即 true），
+                // 不是操作数；from_elements 照建（死的，之后被收拾掉）
+                let _shape = self.value(Kind::TensorFromElements, &shape_values, st);
+                return Ofr::V(self.value_with(Kind::TtReshape, &[v], &[("allow_reorder", Attribute::Unit)], tty));
             }
             if matches!(te, Type::Index) || matches!(e, Type::Index) {
                 return Ofr::V(self.value(Kind::ArithIndexCast, &[v], tty));
@@ -458,8 +460,10 @@ impl Cursor<'_, '_> {
                     shape_values.push(self.index(*d));
                 }
                 let st = Type::tensor(&[dims.len() as i64], Type::Index);
-                let shape = self.value(Kind::TensorFromElements, &shape_values, st);
-                return Ofr::V(self.value(Kind::TtReshape, &[v, shape], tty));
+                // C++ 的 `ReshapeOp::create(b, loc, ty, v, shapeTensor)`：shapeTensor 落在 `bool allowReorder` 上（非空即 true），
+                // 不是操作数；from_elements 照建（死的，之后被收拾掉）
+                let _shape = self.value(Kind::TensorFromElements, &shape_values, st);
+                return Ofr::V(self.value_with(Kind::TtReshape, &[v], &[("allow_reorder", Attribute::Unit)], tty));
             }
             if matches!(te, Type::Index) || matches!(e, Type::Index) {
                 return Ofr::V(self.value(Kind::ArithIndexCast, &[v], tty));
