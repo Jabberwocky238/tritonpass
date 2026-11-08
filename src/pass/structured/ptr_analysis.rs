@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use mlirformat::Type;
-use mlirpass::{Body, OpData, OpId, ValueId};
+use mlirpass::{Body, Diagnostic, OpData, OpId, Severity, ValueId};
 
 use crate::pass::mask::MaskState;
 use crate::pass::ofr::Ofr;
@@ -784,12 +784,13 @@ impl PtrAnalysis {
         src
     }
 
-    fn rewrite_get_state(&mut self, b: &mut Body<'_>, op: OpId) {
+    /// `rewriteGetStructuredStateOp`：认不出（或不是结构化）的退回原值，返回 false。
+    fn rewrite_get_state(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
         let tv = b.opd(op, 0);
         let results = b[op].results.to_vec();
         let Some(st) = self.known.get(&tv).cloned().filter(|s| s.is_structured(b)) else {
             b.replace_all_uses(results[0], tv);
-            return;
+            return false;
         };
         let remapped = self.ptr_map.get(&tv).copied().unwrap_or(tv);
         let mut reps = vec![remapped];
@@ -810,6 +811,7 @@ impl PtrAnalysis {
             }
         }
         b.replace_op(op, &reps);
+        true
     }
 
     /// `rewriteOp`：先序走 `root` 的区域（scf.for 交给 [`Self::rewrite_for`] 递归、读写改写之后不进去）。
@@ -885,7 +887,10 @@ impl PtrAnalysis {
             }
         });
         for o in ops {
-            self.rewrite_get_state(b, o);
+            if !self.rewrite_get_state(b, o) {
+                let d = Diagnostic::at(b, o, Severity::Warning, "Rewriting GetStructuredStateOp failed.");
+                b.report(d);
+            }
         }
     }
 }

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use mlirformat::{Error, Type};
-use mlirpass::{Body, OpData, OpId, PassManager, Passes, ValueId, pass};
+use mlirpass::{Body, Diagnostic, OpData, OpId, PassManager, Passes, Severity, ValueId, pass};
 
 use crate::ir::{dense_i32, int, integer, TtBuilder};
 use mlirpass::{Quiet, Rewriter};
@@ -22,6 +22,8 @@ pub struct TritonToUnstructured {
 impl mlirpass::Run for TritonToUnstructured {
     fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
         if !(Unstructured { bits: self.offset_bits, ..Unstructured::default() }).process(body, op) {
+            let d = Diagnostic::at(body, op, Severity::Warning, "Cannot transform tensor of pointers into a single base pointer with tensor of offsets");
+            body.report(d);
             return Ok(());
         }
         let mut passes = Passes::new();
@@ -38,19 +40,20 @@ struct Unstructured {
     bits: u32,
 }
 
-fn ptr_like(t: &Type<'_>) -> bool {
-    matches!(t.element_type(), Type::Extended(e) if e.name == "tt.ptr")
-}
-
-/// 指针类型 ⇒ 同形的整数偏移类型。
-fn offset_type(t: &Type<'_>, bits: u32) -> Type<'static> {
-    match t {
-        Type::Shaped(_) => Type::tensor(&t.dims().unwrap_or_default(), int(bits)),
-        _ => int(bits),
-    }
-}
-
 impl Unstructured {
+    /// 元素是 `!tt.ptr` 的类型（标量或张量）。
+    fn ptr_like(t: &Type<'_>) -> bool {
+        matches!(t.element_type(), Type::Extended(e) if e.name == "tt.ptr")
+    }
+
+    /// 指针类型 ⇒ 同形的整数偏移类型。
+    fn offset_type(t: &Type<'_>, bits: u32) -> Type<'static> {
+        match t {
+            Type::Shaped(_) => Type::tensor(&t.dims().unwrap_or_default(), int(bits)),
+            _ => int(bits),
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn process(&mut self, b: &mut Body<'_>, root: OpId) -> bool {
         let default_bits = self.bits;
@@ -65,7 +68,7 @@ impl Unstructured {
         for f in funcs {
             let entry = b.entry(f, 0);
             for a in b[entry].args.to_vec() {
-                if !ptr_like(b.ty(a)) {
+                if !Self::ptr_like(b.ty(a)) {
                     continue;
                 }
                 let loc = b[a].loc.clone();
@@ -124,12 +127,12 @@ impl Unstructured {
                         let mut q = Quiet;
                         let mut c = Rewriter::new(b, &mut q);
                         c.before_op(user);
-                        let prev = if lw < w { c.value(Kind::ArithExtsi, &[prev], offset_type(&pt, w)) } else { prev };
+                        let prev = if lw < w { c.value(Kind::ArithExtsi, &[prev], Self::offset_type(&pt, w)) } else { prev };
                         if rw < w {
-                            off = c.value(Kind::ArithExtsi, &[off], offset_type(&pt, w));
+                            off = c.value(Kind::ArithExtsi, &[off], Self::offset_type(&pt, w));
                         }
                         let rt = c.body.ty(c.body.res(user, 0)).owned();
-                        let acc = c.value(Kind::ArithAddi, &[prev, off], offset_type(&rt, w));
+                        let acc = c.value(Kind::ArithAddi, &[prev, off], Self::offset_type(&rt, w));
                         let r = b.res(user, 0);
                         self.map.entry(r).or_insert((p, rt, w, acc));
                         work.push_back(r);
@@ -139,13 +142,13 @@ impl Unstructured {
                     Some(k @ (Kind::TtSplat | Kind::TtBroadcast | Kind::TtExpandDims)) => {
                         let r = b.res(user, 0);
                         let rt = b.ty(r).owned();
-                        if ptr_like(&rt) {
+                        if Self::ptr_like(&rt) {
                             let (p, _, w, off) = self.map[&b.opd(user, 0)].clone();
                             let mut q = Quiet;
                             let mut c = Rewriter::new(b, &mut q);
                             c.before_op(user);
                             // C++ 用不带属性的通用 `create` 克隆
-                            let o = c.create(OpData::named(k.name()).operands(&[off]), &[offset_type(&rt, w)]);
+                            let o = c.create(OpData::named(k.name()).operands(&[off]), &[Self::offset_type(&rt, w)]);
                             let nv = c.body.res(o, 0);
                             self.map.entry(r).or_insert((p, rt, w, nv));
                             work.push_back(r);
@@ -168,7 +171,7 @@ impl Unstructured {
                         let idx = u.index as usize - 3;
                         let init = b.opd(user, 3 + idx);
                         let (p, pt, w, _) = self.map[&init].clone();
-                        let ot = offset_type(&pt, w);
+                        let ot = Self::offset_type(&pt, w);
                         let it = b[b.entry(user, 0)].args[idx + 1];
                         b[it].ty = ot.clone();
                         let r = b.res(user, idx);
