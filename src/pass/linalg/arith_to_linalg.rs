@@ -405,6 +405,43 @@ impl Tt {
         true
     }
 
+    /// `CallConverter`：tt.call ⇒ func.call。被调函数要的参数比给的多（args 写法给它追加了 grid 参数）时，
+    /// 缺的那几个取所在函数入口块的最后几个参数。
+    #[convert("tt.call")]
+    fn call(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        let b = &*cr.rw.body;
+        let mut args: Vec<ValueId> = o.iter().flatten().copied().collect();
+        let callee = b[op].get("callee").cloned();
+        let name = callee.as_ref().and_then(|c| c.text().ok()).map(|n| n.trim_start_matches('@').to_owned());
+        let parent = {
+            let mut at = b.parent_op(op);
+            while let Some(p) = at.filter(|p| !b.is(*p, Kind::TtFunc)) {
+                at = b.parent_op(p);
+            }
+            at
+        };
+        if let (Some(parent), Some(name)) = (parent, name)
+            && let Some(f) = b.find_symbol(b.root, &name).filter(|f| b.is(*f, Kind::TtFunc))
+            && let Some(Attribute::Type(Type::Function(ft))) = b[f].get("function_type")
+        {
+            let need = ft.inputs.len();
+            let inputs = b[b.entry(parent, 0)].args.to_vec();
+            if need > args.len() {
+                let missing = need - args.len();
+                args.extend_from_slice(&inputs[inputs.len() - missing..]);
+            }
+        }
+        let rts: Vec<Type<'_>> = b[op].results.iter().map(|r| b.ty(*r).clone()).collect();
+        let mut d = OpData::build(Kind::FuncCall.name()).operands(&args);
+        if let Some(c) = callee {
+            d.set("callee", c);
+        }
+        let c = cr.rw.create(d, &rts);
+        let rs = cr.rw.body[c].results.to_vec();
+        cr.replace_values(op, &rs);
+        true
+    }
+
     #[convert("tt.get_program_id")]
     fn program_id(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         Self::grid(cr, op, Kind::GpuBlockId)
