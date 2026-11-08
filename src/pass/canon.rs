@@ -40,6 +40,7 @@ impl OpInterfaces for TtInterfaces {
 
     fn canonicalization_patterns(&self, s: &mut PatternSet) {
         s.add(MaskedLoad).add(MaskedStore).add(BroadcastSplat).add(BroadcastBroadcast).add(ReshapeCanon);
+        ExpandDimsCanon::patterns(s);
     }
 }
 
@@ -288,6 +289,46 @@ impl Pattern for ReshapeCanon {
             let mut d = OpData::build(Kind::TtSplat.name()).operands(&[b.opd(s, 0)]);
             d.loc = loc;
             rw.replace_with(op, d, &[ty]);
+            return true;
+        }
+        false
+    }
+}
+
+/// `ExpandDimsOp::canonicalize`。
+pub struct ExpandDimsCanon;
+
+#[mlirpass::patterns]
+impl ExpandDimsCanon {
+    /// expand_dims(splat x) ⇒ splat x；expand_dims(broadcast x) ⇒ broadcast(expand_dims x)。
+    #[rewrite("tt.expand_dims")]
+    fn expand_dims_of_splat_or_broadcast(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let b = &*rw.body;
+        let src = b.opd(op, 0);
+        let Some(def) = b.def_op(src) else { return false };
+        let rt = b.ty(b.res(op, 0)).clone();
+        if b.is(def, Kind::TtSplat) {
+            let x = b.opd(def, 0);
+            rw.replace_with(op, OpData::build(Kind::TtSplat.name()).operands(&[x]), &[rt]);
+            return true;
+        }
+        if b.is(def, Kind::TtBroadcast) {
+            let x = b.opd(def, 0);
+            let xt = b.ty(x).clone();
+            let axis = b.int_attr(op, "axis").unwrap_or(0) as usize;
+            let mut shape = xt.dims().unwrap_or_default();
+            shape.insert(axis, 1);
+            let et = Type::tensor(&shape, xt.element_type().clone());
+            let attr = b[op].get("axis").cloned().expect("axis");
+            let bloc = b[def].loc.clone();
+            rw.set_before(op);
+            let e = rw.create(OpData::build(Kind::TtExpandDims.name()).operands(&[x]).with("axis", attr), &[et]);
+            let ev = rw.body.res(e, 0);
+            let mut d = OpData::build(Kind::TtBroadcast.name()).operands(&[ev]);
+            d.loc = bloc;
+            let nb = rw.create(d, &[rt]);
+            let nv = rw.body.res(nb, 0);
+            rw.replace_op(op, &[nv]);
             return true;
         }
         false

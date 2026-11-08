@@ -59,6 +59,8 @@ impl mlirpass::Run for TritonToStructured {
 #[derive(Default)]
 struct Prepass {
     groups: BTreeMap<ValueId, Vec<ValueId>>,
+    /// 展开过的循环的 yield 与哪几个位置要展开：全部循环展开完再改（内层循环的结果那时已经有组，外层 yield 直接取，同 C++ 的 1→N 转换）
+    yields: Vec<(OpId, Vec<bool>)>,
 }
 
 impl Prepass {
@@ -89,6 +91,18 @@ impl Prepass {
         });
         for f in fors {
             self.expand_for(b, f);
+        }
+        for (y, conv) in core::mem::take(&mut self.yields) {
+            let ys = b[y].operands.to_vec();
+            let mut nys = Vec::new();
+            for (v, c) in ys.iter().zip(&conv) {
+                if *c {
+                    nys.extend(self.group(b, *v));
+                } else {
+                    nys.push(*v);
+                }
+            }
+            b.set_operands(y, nys);
         }
     }
 
@@ -152,16 +166,7 @@ impl Prepass {
                 b.splice(oblk, None, nblk, None);
         // yield
         if let Some(y) = b.terminator(nblk).filter(|y| b.is(*y, Kind::ScfYield)) {
-            let ys = b[y].operands.to_vec();
-            let mut nys = Vec::new();
-            for (v, c) in ys.iter().zip(&conv) {
-                if *c {
-                    nys.extend(self.group(b, *v));
-                } else {
-                    nys.push(*v);
-                }
-            }
-            b.set_operands(y, nys);
+            self.yields.push((y, conv.clone()));
         }
         // 结果
         let ores = b[f].results.to_vec();
