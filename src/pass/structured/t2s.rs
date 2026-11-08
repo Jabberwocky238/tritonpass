@@ -1,17 +1,13 @@
 //! `triton-to-structured`（triton-shared `TritonToStructuredPass.cpp`）：prepass 把 scf 携带的指针、整型偏移张量展开成
 //! （值, 各维偏移, 各维行距）放进 `tts.get_structured_state` 的占位里，再由 [`PtrAnalysis`] 改写指针算术与读写。
 //!
-//! prepass 在 C++ 里是两轮 1→N 的方言转换（先转成 tuple、canonicalize，再拆开、reconcile）；这里直接做出它的净效果：先跑
-//! canonicalize，再按先序把每个 scf.for 的这类携带值展开——初值与 yield 的值各在定义处之后补一条 `tts.get_structured_state`，
-//! 迭代参数与结果的用处换成那组的第一个。
-use std::collections::BTreeMap;
-
+//! prepass 照 C++ 是两轮 1→N 的方言转换（mlirpass 的 [`ScfStructural`]）：先把这类值换成 tuple 再 canonicalize，再把
+//! tuple 拆平、要的地方补 `tts.get_structured_state`，最后 reconcile-unrealized-casts。
 use mlirformat::{Error, Type};
-use mlirpass::{Body, Def, OpData, OpId, ValueId, pass};
+use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionTarget, Converter, Mode, OpData, OpId, PassManager, Passes, Rewriter, ScfStructural, TypeConverter, ValueId, pass};
 
 use crate::pass::ptr_analysis::PtrAnalysis;
-use crate::ir::{dense_i32, TtBuilder};
-use mlirpass::{Quiet, Rewriter};
+use crate::ir::dense_i32;
 use crate::pass::uniform_lanes::Canon;
 use crate::{Ir, Kind, pointee};
 
@@ -42,8 +38,7 @@ impl mlirpass::Run for TritonToStructured {
             return Err(Error::from("triton-to-structured：use-unsafe-mask 还没移植"));
         }
         if !self.skip_prepass {
-            Canon::run(body, op)?;
-            Prepass::default().run(body, op);
+            Prepass::run(body, op)?;
         }
         if self.prepass_only {
             return Ok(());
@@ -56,16 +51,11 @@ impl mlirpass::Run for TritonToStructured {
     }
 }
 
-/// 展开的状态：旧值 ⇒ 新的一组（值, 偏移…, 行距…）；初值、yield 值的 get_structured_state 按值缓存。
-#[derive(Default)]
-struct Prepass {
-    groups: BTreeMap<ValueId, Vec<ValueId>>,
-    /// 展开过的循环的 yield 与哪几个位置要展开：全部循环展开完再改（内层循环的结果那时已经有组，外层 yield 直接取，同 C++ 的 1→N 转换）
-    yields: Vec<(OpId, Vec<bool>)>,
-}
+/// prepass（`runTritonToStructuredPrepass`）：两轮 1→N 的方言转换，类型转换器各一个。
+struct Prepass;
 
 impl Prepass {
-    /// 要展开成几个偏移、几个行距（`getOffsetAndStrideSegmentSizes`）；不展开是 `None`。
+    /// 要展开成几个偏移、几个行距（`GetStructuredStateOp::getOffsetAndStrideTypes`）；不展开是 `None`。
     fn segments(t: &Type<'_>) -> Option<(usize, usize)> {
         match t {
             Type::Shaped(_) => {
@@ -83,111 +73,61 @@ impl Prepass {
         }
     }
 
-    fn run(&mut self, b: &mut Body<'_>, root: OpId) {
-        let mut fors = Vec::new();
-        b.walk(root, &mut |o| {
-            if b.is(o, Kind::ScfFor) {
-                fors.push(o);
-            }
+    /// `getStructuredStateTupleType`：tuple<t, 各维偏移, 各维行距>（都是 index）。
+    fn tuple<'a>(t: &Type<'a>) -> Option<Type<'a>> {
+        let (no, ns) = Self::segments(t)?;
+        let mut ts = vec![t.clone()];
+        ts.extend(core::iter::repeat_n(Type::Index, no + ns));
+        Some(Type::Tuple(ts))
+    }
+
+    /// 一个类型转换器下的 scf 结构转换（`populateSCFStructuralTypeConversionsAndLegality` + `applyPartialConversion`）。
+    fn convert(body: &mut Body<'_>, op: OpId, tc: &TypeConverter<'_>) -> Result<(), Error> {
+        let mut target = ConversionTarget::default();
+        ScfStructural::target(&mut target, tc);
+        let mut patterns = ConversionPatterns::default();
+        let i = patterns.converter(tc);
+        ScfStructural::populate(&mut patterns, i);
+        Converter::new(&target, &patterns, ConversionConfig::default()).apply(body, &[op], Mode::Partial)
+    }
+
+    /// 一个 unrealized_conversion_cast。
+    fn cast<'a>(rw: &mut Rewriter<'_, 'a>, types: &[Type<'a>], inputs: &[ValueId]) -> Vec<ValueId> {
+        let o = rw.create(OpData::build("builtin.unrealized_conversion_cast").operands(inputs), types);
+        rw.body[o].results.to_vec()
+    }
+
+    fn run(body: &mut Body<'_>, op: OpId) -> Result<(), Error> {
+        // `convertToPointerTupleWithOffsetsAndStrides`：指针 / 整型张量换成 tuple，再 canonicalize
+        let mut tc = TypeConverter::default();
+        tc.conversion(|t| Some(Some(vec![t.clone()])));
+        tc.conversion(|t| match t {
+            Type::Shaped(_) | Type::Extended(_) => Self::tuple(t).map(|u| Some(vec![u])),
+            _ => None,
         });
-        for f in fors {
-            self.expand_for(b, f);
-        }
-        for (y, conv) in core::mem::take(&mut self.yields) {
-            let ys = b[y].operands.to_vec();
-            let mut nys = Vec::new();
-            for (v, c) in ys.iter().zip(&conv) {
-                if *c {
-                    nys.extend(self.group(b, *v));
-                } else {
-                    nys.push(*v);
-                }
-            }
-            b.set_operands(y, nys);
-        }
-    }
-
-    /// `v` 的一组：已经展开过就是那组，否则在它定义之后补一条 get_structured_state。
-    fn group(&mut self, b: &mut Body<'_>, v: ValueId) -> Vec<ValueId> {
-        if let Some(g) = self.groups.get(&v) {
-            return g.clone();
-        }
-        let t = b.ty(v).clone();
-        let (no, ns) = Self::segments(&t).expect("可展开");
-        let mut tys = vec![t];
-        tys.extend(core::iter::repeat_n(Type::Index, no + ns));
-        let d = OpData::build(Kind::TtsGetStructuredState.name()).operands(&[v]).with("resultSegmentSizes", dense_i32(&[1, no as i64, ns as i64]));
-        let mut q = Quiet;
-        let mut c = Rewriter::new(b, &mut q);
-        match c.body[v].def {
-            Def::Result(o, _) => {
-                c.set_after(o);
-                c.loc = c.body[o].loc.clone();
-            }
-            Def::Arg(blk, _) => {
-                c.set_start(blk);
-                c.loc = c.body[v].loc.clone();
-            }
-        }
-        let o = c.create(d, &tys);
-        let g = b[o].results.to_vec();
-        self.groups.insert(v, g.clone());
-        g
-    }
-
-    fn expand_for(&mut self, b: &mut Body<'_>, f: OpId) {
-        let inits = b[f].operands[3..].to_vec();
-        let conv: Vec<bool> = inits.iter().map(|v| Self::segments(b.ty(*v)).is_some()).collect();
-        if !conv.iter().any(|x| *x) {
-            return;
-        }
-        // 新初值
-        let mut new_inits = Vec::new();
-        for (v, c) in inits.iter().zip(&conv) {
-            if *c {
-                new_inits.extend(self.group(b, *v));
-            } else {
-                new_inits.push(*v);
-            }
-        }
-        let (lb, ub, step) = (b.opd(f, 0), b.opd(f, 1), b.opd(f, 2));
-        let mut q = Quiet;
-        let mut cur = Rewriter::new(b, &mut q);
-        cur.before_op(f);
-        let (nf, nblk) = cur.for_loop(lb, ub, step, &new_inits);
-        // 搬循环体：旧块参数 ⇒ 新块参数（展开的取那组）
-        let oblk = b.entry(f, 0);
-        let oargs = b[oblk].args.to_vec();
-        let nargs = b[nblk].args.to_vec();
-        b.replace_all_uses(oargs[0], nargs[0]);
-        let mut k = 1;
-        for (i, c) in conv.iter().enumerate() {
-            let n = if *c { 1 + Self::segments(b.ty(inits[i])).map_or(0, |(a, s)| a + s) } else { 1 };
-            let g = nargs[k..k + n].to_vec();
-            b.replace_all_uses(oargs[i + 1], g[0]);
-            if *c {
-                self.groups.insert(g[0], g.clone());
-            }
-            k += n;
-        }
-                b.splice(oblk, None, nblk, None);
-        // yield
-        if let Some(y) = b.terminator(nblk).filter(|y| b.is(*y, Kind::ScfYield)) {
-            self.yields.push((y, conv.clone()));
-        }
-        // 结果
-        let ores = b[f].results.to_vec();
-        let nres = b[nf].results.to_vec();
-        let mut k = 0;
-        for (i, c) in conv.iter().enumerate() {
-            let n = if *c { 1 + Self::segments(b.ty(inits[i])).map_or(0, |(a, s)| a + s) } else { 1 };
-            let g = nres[k..k + n].to_vec();
-            b.replace_all_uses(ores[i], g[0]);
-            if *c {
-                self.groups.insert(g[0], g.clone());
-            }
-            k += n;
-        }
-        b.erase(f);
+        tc.source(|rw, ty, inputs| Self::cast(rw, core::slice::from_ref(ty), inputs).first().copied());
+        tc.target(|rw, tys, inputs, _| Some(Self::cast(rw, tys, &inputs[..1])));
+        Self::convert(body, op, &tc)?;
+        Canon::run(body, op)?;
+        // `decomposePointerTuple`：tuple 拆平；要的地方补 get_structured_state（取 tuple 来源 cast 的操作数），再消掉 cast
+        let mut tc = TypeConverter::default();
+        tc.conversion(|t| Some(Some(vec![t.clone()])));
+        tc.conversion(|t| match t {
+            Type::Tuple(ts) => Some(Some(ts.clone())),
+            _ => None,
+        });
+        tc.source(|rw, ty, inputs| Self::cast(rw, core::slice::from_ref(ty), &inputs[..1]).first().copied());
+        tc.target(|rw, tys, inputs, _| {
+            let def = rw.body.def_op(inputs[0])?;
+            let src = rw.body[def].operands[0];
+            let (no, ns) = Self::segments(rw.body.ty(src))?;
+            let d = OpData::build(Kind::TtsGetStructuredState.name()).operands(&[src]).with("resultSegmentSizes", dense_i32(&[1, no as i64, ns as i64]));
+            let o = rw.create(d, tys);
+            Some(rw.body[o].results.to_vec())
+        });
+        Self::convert(body, op, &tc)?;
+        let mut passes = Passes::new();
+        passes.register::<mlirpass::ReconcileUnrealizedCasts>();
+        PassManager::parse(&passes, &format!("{}(reconcile-unrealized-casts)", body[op].name))?.run_on(body, op, &moremath::ThreadSingle)
     }
 }
