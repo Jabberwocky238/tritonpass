@@ -48,6 +48,7 @@ pub struct TritonArithToLinalg {
 const LAUNCH_GRID_RANK: usize = 3;
 
 /// cmpf / cmpi 谓词。
+const CMPF_OEQ: i128 = 1;
 const CMPF_OGT: i128 = 2;
 const CMPF_OGE: i128 = 3;
 const CMPF_OLT: i128 = 4;
@@ -383,6 +384,18 @@ impl Tt {
         true
     }
 
+    /// `ArgMinConverter`：组合器是「严格小于、相等取小下标」的 argmin ⇒ 带两块初值（+inf、-1）的 linalg.reduce，体照抄组合器。
+    #[convert("tt.reduce")]
+    fn argmin(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        Self::arg_min_max(cr, op, o, CMPF_OLT, f64::INFINITY)
+    }
+
+    /// `ArgMaxConverter`：同上，严格大于、初值 -inf。
+    #[convert("tt.reduce")]
+    fn argmax(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        Self::arg_min_max(cr, op, o, CMPF_OGT, f64::NEG_INFINITY)
+    }
+
     #[convert("tt.reduce")]
     fn reduce(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
@@ -638,6 +651,69 @@ impl Tt {
         let d = OpData::build(Kind::TensorExpandShape.name()).operands(&[src]).with("reassociation", Reassoc::attr(groups)).with("static_output_shape", dense_i64(&L::dims(&rt)));
         let e = cr.rw.create(d, &[rt]);
         cr.rw.body[e].results[0]
+    }
+
+    /// `ArgMinMaxBaseConverter::matchAndRewrite`：组合器的块 4 个参数 (cv, ci, rv, ri)，体依次是
+    /// `cmpf oeq cv rv`、`cmpi slt ci ri`、`andi`、`cmpf <pred> cv rv`、`ori`、`select … cv rv`、`select … ci ri`、`tt.reduce.return`。
+    fn arg_min_max(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>], pred: i128, base: f64) -> bool {
+        let b = &*cr.rw.body;
+        let blk = b.entry(op, 0);
+        let args = b[blk].args.to_vec();
+        if args.len() != 4 {
+            return false;
+        }
+        let (cv, ci, rv, ri) = (args[0], args[1], args[2], args[3]);
+        let ops = b.block_ops(blk);
+        let res = |o: OpId| b.res(o, 0);
+        let is = |o: OpId, k: Kind, x: ValueId, y: ValueId| b.is(o, k) && b.opd(o, 0) == x && b.opd(o, 1) == y;
+        let p = |o: OpId| b.int_attr(o, "predicate").map(i128::from);
+        let [eq, slt, and, cmp, or, vsel, isel, ret] = ops[..] else { return false };
+        let ok = is(eq, Kind::ArithCmpf, cv, rv) && p(eq) == Some(CMPF_OEQ)
+            && is(slt, Kind::ArithCmpi, ci, ri) && p(slt) == Some(CMPI_SLT)
+            && is(and, Kind::ArithAndi, res(eq), res(slt))
+            && is(cmp, Kind::ArithCmpf, cv, rv) && p(cmp) == Some(pred)
+            && is(or, Kind::ArithOri, res(cmp), res(and))
+            && b.is(vsel, Kind::ArithSelect) && b[vsel].operands[..] == [res(or), cv, rv]
+            && b.is(isel, Kind::ArithSelect) && b[isel].operands[..] == [res(or), ci, ri]
+            && b.is(ret, Kind::TtReduceReturn) && b[ret].operands[..] == [res(vsel), res(isel)];
+        if !ok {
+            return false;
+        }
+        let (vsel_v, isel_v) = (res(vsel), res(isel));
+        let (vt, it) = (b.ty(cv).clone(), b.ty(ci).clone());
+        let axis = b.int_attr(op, "axis").unwrap_or(0) as i64;
+        let result_ty = b.ty(b.res(op, 0)).clone();
+        let scalar = !matches!(result_ty, Type::Shaped(_));
+        let shape = if scalar { Vec::new() } else { L::dims(&result_ty) };
+        let kind = crate::ir::float_kind(&vt).unwrap_or(mlirformat::FloatKind::F32);
+        let vbase = L::constant(cr, crate::ir::float(kind, base), &vt);
+        let width = it.int_width().map_or(32, |(w, _)| w);
+        let ibase = L::constant(cr, crate::ir::integer(width, -1), &it);
+        let vinit = cr.empty(&shape, vt.clone(), &[]);
+        let vinit = L::fill(cr, vbase, vinit);
+        let iinit = cr.empty(&shape, it.clone(), &[]);
+        let iinit = L::fill(cr, ibase, iinit);
+        let inputs: Vec<ValueId> = o.iter().flatten().copied().collect();
+        let rts = [Type::tensor(&shape, vt.clone()), Type::tensor(&shape, it.clone())];
+        let body_ops: Vec<OpId> = ops[..ops.len() - 1].to_vec();
+        let r = cr.structured("linalg.reduce", &inputs, &[vinit, iinit], &rts, vec![("dimensions", dense_i64(&[axis]))], &mut |cr, x| {
+            let mut map = mlirpass::Mapping::default();
+            for (from, to) in args.iter().zip(x) {
+                map.values.insert(*from, *to);
+            }
+            for o in &body_ops {
+                cr.rw.clone(*o, &mut map);
+            }
+            vec![map.values[&vsel_v], map.values[&isel_v]]
+        });
+        let mut rs = cr.rw.body[r].results.to_vec();
+        if scalar {
+            let v = cr.op1(Kind::TensorExtract.name(), &[rs[0]], vt);
+            let i = cr.op1(Kind::TensorExtract.name(), &[rs[1]], it);
+            rs = vec![v, i];
+        }
+        cr.replace_values(op, &rs);
+        true
     }
 
     /// 指针张量上的 op ⇒ `linalg.generic`：各维 parallel、映射全是恒等，体里是同名同属性的标量 op（照 C++，操作数用原 op 的，
