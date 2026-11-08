@@ -10,27 +10,34 @@
 use std::collections::BTreeSet;
 
 use mlirformat::{Error, ShapedKind, Type};
-use mlirpass::{BlockId, Body, OpData, OpId, ValueId, pass};
+use mlirpass::{BlockId, Body, OpData, OpId, PatternSet, Rewriter, ValueId, pass, patterns};
 
-use crate::ir::{At, Cursor};
+use crate::ir::TtBuilder;
 use crate::{Ir, Kind};
 
 #[pass("triton-carried-buffers-in-place", on = "builtin.module", ty = CarriedBuffersInPlace)]
 pub fn carried_buffers_in_place<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let mut targets = Vec::new();
-    body.walk_post(op, &mut |l| {
-        if body.is(l, Kind::ScfFor) && Carried::rewritable(body, l) {
-            targets.push(l);
-        }
-    });
-    for l in targets {
-        Carried::rewrite(body, l);
-    }
+    let mut set = PatternSet::default();
+    Carried::patterns(&mut set);
+    body.walk_and_apply(op, &set);
     Ok(())
 }
 
 /// 携带缓冲的识别与改写。
-struct Carried;
+pub struct Carried;
+
+#[patterns]
+impl Carried {
+    /// 携带 memref 的 scf.for ⇒ 不携带缓冲：体里直接用初值缓冲，每轮末尾把要 yield 的新缓冲拷回去。
+    #[rewrite("scf.for")]
+    fn carry_in_place(rw: &mut Rewriter<'_, '_>, l: OpId) -> bool {
+        if !Self::rewritable(rw.body, l) {
+            return false;
+        }
+        Self::rewrite(rw, l);
+        true
+    }
+}
 
 impl Carried {
     fn is_memref(b: &Body<'_>, v: ValueId) -> bool {
@@ -81,43 +88,36 @@ impl Carried {
         any
     }
 
-    fn rewrite(b: &mut Body<'_>, l: OpId) {
+    fn rewrite(rw: &mut Rewriter<'_, '_>, l: OpId) {
+        let b = &*rw.body;
         let old_block = b.entry(l, 0);
         let old_yield = b.terminator(old_block).expect("rewritable 核过有终结符");
         let inits = b[l].operands[3..].to_vec();
         let memref: Vec<bool> = inits.iter().map(|&v| Self::is_memref(b, v)).collect();
         let kept_inits: Vec<ValueId> = inits.iter().zip(&memref).filter(|(_, m)| !**m).map(|(v, _)| *v).collect();
         let (lb, ub, step) = (b.opd(l, 0), b.opd(l, 1), b.opd(l, 2));
-        let loc = b[l].loc.clone();
-        let (new, new_block) = Cursor::before(b, l).for_loop(lb, ub, step, &kept_inits);
-        let old_args = b[old_block].args.to_vec();
-        let new_args = b[new_block].args.to_vec();
-        b.replace_all_uses(old_args[0], new_args[0]);
+        rw.set_before(l);
+        let (new, new_block) = rw.for_loop(lb, ub, step, &kept_inits);
+        // 旧体整段搬进新体（含旧终结符）：归纳变量换成新的，携带的缓冲就是循环外那块初值缓冲，标量携带值换成新块参数
+        let new_args = rw.body[new_block].args.to_vec();
         let mut kept = new_args[1..].iter();
-        for ((&init, &m), &old) in inits.iter().zip(&memref).zip(&old_args[1..]) {
-            // 携带的缓冲就是循环外那块初值缓冲
-            let to = if m { init } else { *kept.next().expect("标量携带值一一对应") };
-            b.replace_all_uses(old, to);
-        }
-        // 旧体整段搬进新体（含旧终结符），每轮末尾把新缓冲拷回初值缓冲，终结符换成只带标量携带值的
-        b.splice(old_block, None, new_block, None);
-        let yielded = b[old_yield].operands.to_vec();
-        let mut c = Cursor { body: b, at: At::Before(old_yield), loc };
+        let mut args = vec![new_args[0]];
+        args.extend(inits.iter().zip(&memref).map(|(&init, &m)| if m { init } else { *kept.next().expect("标量携带值一一对应") }));
+        rw.inline_block_before(old_block, new_block, None, &args);
+        // 每轮末尾把新缓冲拷回初值缓冲，终结符换成只带标量携带值的
+        let yielded = rw.body[old_yield].operands.to_vec();
+        rw.set_before(old_yield);
         for ((&init, &m), &y) in inits.iter().zip(&memref).zip(&yielded) {
             if m && y != init {
-                c.create(OpData::build(Kind::MemrefCopy.name()).operands(&[y, init]), &[]);
+                rw.create(OpData::build(Kind::MemrefCopy.name()).operands(&[y, init]), &[]);
             }
         }
         let kept_yield: Vec<ValueId> = yielded.iter().zip(&memref).filter(|(_, m)| !**m).map(|(v, _)| *v).collect();
-        c.create(OpData::build(Kind::ScfYield.name()).operands(&kept_yield), &[]);
-        b.erase(old_yield);
-        let old_results = b[l].results.to_vec();
-        let new_results = b[new].results.to_vec();
+        rw.create(OpData::build(Kind::ScfYield.name()).operands(&kept_yield), &[]);
+        rw.erase_op(old_yield);
+        let new_results = rw.body[new].results.to_vec();
         let mut slot = new_results.iter();
-        for ((&init, &m), &r) in inits.iter().zip(&memref).zip(&old_results) {
-            let to = if m { init } else { *slot.next().expect("标量结果一一对应") };
-            b.replace_all_uses(r, to);
-        }
-        b.erase(l);
+        let with: Vec<ValueId> = inits.iter().zip(&memref).map(|(&init, &m)| if m { init } else { *slot.next().expect("标量结果一一对应") }).collect();
+        rw.replace_op(l, &with);
     }
 }

@@ -7,49 +7,92 @@
 //! 多出口的 tt.func 结构化之后，末尾留下纯选择器的死链（零结果、分支皆空的 scf.index_switch，喂给它的 scf.if、
 //! index_castui）：`triton-drop-dead-exit-switch` 只清这一条特定的链（⛔ 通用 canonicalize：会连带吃掉本该被 P0 点名的死值）。
 use mlirformat::Error;
-use mlirpass::{Body, OpData, OpId, pass};
+use mlirpass::{Body, OpData, OpId, PatternSet, Rewriter, pass, patterns};
 
 use super::cfg_to_scf::{CfgToScf, Lift};
 use crate::{Ir, Kind};
 
+/// 多块的 tt.func 结构化成单块：只在完全成功（一个 cf.* 都不剩）时留下，否则回滚到改写之前。
+pub struct LiftRules;
+
+#[patterns]
+impl LiftRules {
+    #[rewrite("tt.func")]
+    fn lift_function(rw: &mut Rewriter<'_, '_>, f: OpId) -> bool {
+        let region = rw.body[f].regions[0];
+        if rw.body[region].blocks.len() <= 1 {
+            return false;
+        }
+        let cp = rw.body.checkpoint();
+        let lifted = CfgToScf::run(rw.body, region) == Lift::Done && !rw.body.ops_in(f).iter().any(|o| matches!(rw.body.kind(*o), Some(Kind::CfBr | Kind::CfCondBr | Kind::CfSwitch)));
+        if lifted {
+            rw.body.release(cp);
+            rw.modify(f, |_| {});
+        } else {
+            rw.body.rollback(cp);
+        }
+        lifted
+    }
+}
+
 #[pass("triton-lift-cf-to-scf", on = "builtin.module", ty = LiftCfToScf)]
 pub fn lift_cf_to_scf<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let funcs: Vec<OpId> = body.ops_in(op).into_iter().filter(|o| body.is(*o, Kind::TtFunc) && body[body[*o].regions[0]].blocks.len() > 1).collect();
-    for f in funcs {
-        let cp = body.checkpoint();
-        let region = body[f].regions[0];
-        let lifted = CfgToScf::run(body, region) == Lift::Done && !body.ops_in(f).iter().any(|o| matches!(body.kind(*o), Some(Kind::CfBr | Kind::CfCondBr | Kind::CfSwitch)));
-        if lifted {
-            body.release(cp);
-        } else {
-            body.rollback(cp);
-        }
-    }
+    let mut set = PatternSet::default();
+    LiftRules::patterns(&mut set);
+    body.walk_and_apply(op, &set);
     Ok(())
 }
 
-#[pass("triton-drop-dead-exit-switch", on = "builtin.module", ty = DropDeadExitSwitch)]
-pub fn drop_dead_exit_switch<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let candidates: Vec<OpId> = body.ops_in(op).into_iter().filter(|o| matches!(body.kind(*o), Some(Kind::ScfIndexSwitch | Kind::ScfIf | Kind::ArithIndexCastui | Kind::ArithIndexCast))).collect();
-        // 内层先处理：先序收集、逆序处理
-        for o in candidates.into_iter().rev() {
-            if body[o].parent.is_none() {
-                continue;
+/// 结构化之后末尾留下的纯选择器死链：零结果、分支皆空的 scf.index_switch，喂给它的、结果没人用的 scf.if，没人用的
+/// index_cast(ui)。只认这几种（⛔ 通用 canonicalize / greedy：greedy 会顺手删别的死值），反复走到没有一条再命中为止。
+pub struct DeadExit;
+
+#[patterns]
+impl DeadExit {
+    #[rewrite("scf.index_switch")]
+    fn empty_switch(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        if !rw.body[op].results.is_empty() || !rw.body[op].regions.iter().all(|r| Self::trivial(rw.body, *r)) {
+            return false;
+        }
+        rw.erase_op(op);
+        true
+    }
+
+    /// 有结果但一个都没人用的 scf.if：重建成零结果的（两支原样搬过去，各自的 yield 清空操作数）。
+    #[rewrite("scf.if")]
+    fn unused_if(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        if rw.body[op].results.is_empty() || rw.body[op].results.iter().any(|r| !rw.body[*r].uses.is_empty()) {
+            return false;
+        }
+        let regions = rw.body[op].regions.clone();
+        rw.set_before(op);
+        let new = rw.create_with(OpData::build(Kind::ScfIf.name()).operands(&[rw.body.opd(op, 0)]), &[], |b, n| {
+            for _ in &regions {
+                b.add_region(n);
             }
-            changed |= match body.kind(o) {
-                Some(Kind::ScfIndexSwitch) => DeadExit::switch(body, o),
-                Some(Kind::ScfIf) => DeadExit::unused_if(body, o),
-                _ => DeadExit::cast(body, o),
-            };
+        });
+        for (from, into) in regions.iter().zip(rw.body[new].regions.clone()) {
+            rw.inline_region_before(*from, into, None);
+            for b in rw.body.blocks(into) {
+                if let Some(y) = rw.body.terminator(b).filter(|y| rw.body.is(*y, Kind::ScfYield)) {
+                    rw.modify(y, |body| body.set_operands(y, Vec::new()));
+                }
+            }
         }
+        rw.erase_op(op);
+        true
     }
-    Ok(())
-}
 
-struct DeadExit;
+    #[rewrite("arith.index_castui")]
+    fn unused_index_castui(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Self::unused_cast(rw, op)
+    }
+
+    #[rewrite("arith.index_cast")]
+    fn unused_index_cast(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Self::unused_cast(rw, op)
+    }
+}
 
 impl DeadExit {
     /// 区域「纯空」：只有一条不带操作数的 scf.yield。
@@ -59,44 +102,19 @@ impl DeadExit {
         ops.len() == 1 && body.is(ops[0], Kind::ScfYield) && body[ops[0]].operands.is_empty()
     }
 
-    fn switch(body: &mut Body<'_>, op: OpId) -> bool {
-        if !body[op].results.is_empty() || !body[op].regions.iter().all(|r| Self::trivial(body, *r)) {
+    fn unused_cast(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        if !rw.body[rw.body.res(op, 0)].uses.is_empty() {
             return false;
         }
-        body.erase(op);
+        rw.erase_op(op);
         true
     }
+}
 
-    /// 有结果但一个都没人用的 scf.if：重建成零结果的（两支原样搬过去，各自的 yield 清空操作数）。
-    fn unused_if(body: &mut Body<'_>, op: OpId) -> bool {
-        if body[op].results.is_empty() || body[op].results.iter().any(|r| !body[*r].uses.is_empty()) {
-            return false;
-        }
-        let mut d = OpData::build(Kind::ScfIf.name()).operands(&[body.opd(op, 0)]);
-        d.loc.clone_from(&body[op].loc);
-        let new = body.create(d, &[]);
-        body.insert_before(new, op);
-        for r in body[op].regions.clone() {
-            let target = body.add_region(new);
-            for b in body.blocks(r) {
-                body.remove_block(b);
-                let at = body[target].blocks.len();
-                body.region_insert(target, at, b);
-                body[b].parent = Some(target);
-                if let Some(y) = body.terminator(b).filter(|y| body.is(*y, Kind::ScfYield)) {
-                    body.set_operands(y, Vec::new());
-                }
-            }
-        }
-        body.erase(op);
-        true
-    }
-
-    fn cast(body: &mut Body<'_>, op: OpId) -> bool {
-        if !body[body.res(op, 0)].uses.is_empty() {
-            return false;
-        }
-        body.erase(op);
-        true
-    }
+#[pass("triton-drop-dead-exit-switch", on = "builtin.module", ty = DropDeadExitSwitch)]
+pub fn drop_dead_exit_switch<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
+    let mut set = PatternSet::default();
+    DeadExit::patterns(&mut set);
+    while body.walk_and_apply(op, &set) {}
+    Ok(())
 }
