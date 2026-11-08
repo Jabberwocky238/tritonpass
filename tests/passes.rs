@@ -20,7 +20,7 @@ use mlirpass::{Body, Ctx, Interfaces, Invocation, Passes};
 use tritonpass::{TritonPasses, TtInterfaces, load_triton};
 
 /// 逐字节对上的块数：哪次改动让更多块对上就调高它。
-const FLOOR: usize = 466;
+const FLOOR: usize = 487;
 
 #[derive(Default, Clone, Copy)]
 struct Tally {

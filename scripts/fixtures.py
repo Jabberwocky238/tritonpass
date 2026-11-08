@@ -37,16 +37,15 @@ PIPELINE = ("builtin.module(dope-lift-cf-to-scf, dope-drop-dead-exit-switch, dop
             "dope-normalize-loop-index, dope-lower-bool-ptr, dope-scalar-ptr, triton-to-structured, cse, canonicalize, "
             "triton-to-unstructured, dope-squeeze-unit-dims, triton-arith-to-linalg{pids-to-func-args=false pids-to-gpu=true}, "
             "structured-to-memref, triton-ptr-to-memref, reconcile-unrealized-casts, remove-dead-values, cse, canonicalize)")
-# triton-shared 的 pids 选项 ⇒ tritonpass 的 grid-encoding（缺省 pids-to-func-args=true 即 args）
+
+# 每条 triton-arith-to-linalg 用例另跑一份 gpu 写法（参照的选项原样，tritonpass 认同样的名字）
 GPU_REF = "pids-to-func-args=false pids-to-gpu=true"
 
 MARKER = "// -----"
 
 
 def rename(text):
-    text = re.sub(r"dope-[a-z0-9-]+", lambda m: RENAME.get(m.group(0), m.group(0)), text)
-    text = text.replace(GPU_REF, "grid-encoding=gpu")
-    return "--triton-arith-to-linalg=grid-encoding=args" if text == "--triton-arith-to-linalg" else text
+    return re.sub(r"dope-[a-z0-9-]+", lambda m: RENAME.get(m.group(0), m.group(0)), text)
 
 
 def chunks(src, split):

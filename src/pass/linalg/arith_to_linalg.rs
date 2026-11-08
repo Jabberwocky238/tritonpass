@@ -5,21 +5,47 @@
 //!
 //! 只移植了语料与合同用得到的模式：cat、split、join、mulhiui、argmin / argmax、assert、call 没有（P0 已拒收）。
 
-use mlirformat::{AffineExpr, AffineMap, Attribute, Error, NamedAttr, Scalar, Type};
+use mlirformat::{AffineExpr, AffineMap, Attribute, Error, FunctionType, NamedAttr, Scalar, Type};
 use mlirpass::{
     Action, Body, ConversionConfig, ConversionPattern, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, GreedyConfig, Mode, OpData, OpId, Pattern, PatternSet, Rewriter, Run, Trait, ValueId, pass, patterns,
 };
 
 use crate::ir::{dense_i64, dense_values, i64_attr};
-use crate::{Build, GridEncoding, Ir, Kind};
+use crate::{Build, Ir, Kind};
 
 type Cr<'r, 'a, 'p> = ConversionRewriter<'r, 'a, 'p>;
 
+/// 选项同 triton-shared 分叉（dope-opt）的 `Passes.td`，名字与缺省值一样。
 #[pass("triton-arith-to-linalg", on = "builtin.module")]
 pub struct TritonArithToLinalg {
-    #[opt("grid-encoding")]
-    grid: String,
+    /// tt.get_program_id / tt.get_num_programs ⇒ 函数末尾追加的 6 个 i32 参数（num_programs ×3 在前，program_id ×3 在后）
+    #[opt("pids-to-func-args", default = true)]
+    pids_to_func_args: bool,
+    /// ⇒ gpu.block_id / gpu.grid_dim（index，再 index_cast 成 i32），签名不变；与 pids-to-func-args 互斥
+    #[opt("pids-to-gpu")]
+    pids_to_gpu: bool,
+    /// pids-to-func-args 时追加的 6 个参数带 `{dope.sys = "program_id_x"}` 一类的属性（交接合同的后备写法 B′）
+    #[opt("dope-sys-attrs")]
+    dope_sys_attrs: bool,
+    /// tt.func ⇒ func.func
+    #[opt("tt-to-func-func", default = true)]
+    tt_to_func_func: bool,
+    /// 张量上的 tt.addptr ⇒ linalg
+    #[opt("addptr-to-linalg", default = true)]
+    addptr_to_linalg: bool,
+    /// tt.assert ⇒ cf.assert
+    #[opt("assert-to-cf", default = true)]
+    assert_to_cf: bool,
+    /// 指针张量上的 tt op ⇒ linalg.generic
+    #[opt("tensor-ptr-to-linalg")]
+    tensor_ptr_to_linalg: bool,
+    /// 归约转置到 rank 0（dope：转置已去掉，两种取值都沿原轴归约）
+    #[opt("transpose-reduce-to-rank0", default = true)]
+    transpose_reduce_to_rank0: bool,
 }
+
+/// `LAUNCH_GRID_RANK`：网格的维数。
+const LAUNCH_GRID_RANK: usize = 3;
 
 /// cmpf / cmpi 谓词。
 const CMPF_OGT: i128 = 2;
@@ -120,7 +146,7 @@ impl L {
 /// tt 张量 op 的转换模式。
 struct Tt;
 
-#[patterns]
+#[patterns(gpu: bool, args: bool)]
 impl Tt {
     #[convert("tt.splat")]
     fn splat(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
@@ -442,14 +468,28 @@ impl Tt {
         true
     }
 
-    #[convert("tt.get_program_id")]
-    fn program_id(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+    /// `GetProgramIDGpuConverter`。
+    #[convert("tt.get_program_id", when = gpu)]
+    fn program_id_gpu(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         Self::grid(cr, op, Kind::GpuBlockId)
     }
 
-    #[convert("tt.get_num_programs")]
-    fn num_programs(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+    /// `GetNumProgramsGpuConverter`。
+    #[convert("tt.get_num_programs", when = gpu)]
+    fn num_programs_gpu(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         Self::grid(cr, op, Kind::GpuGridDim)
+    }
+
+    /// `GetProgramIDConverter`：所在函数倒数第 3 − axis 个参数。
+    #[convert("tt.get_program_id", when = args)]
+    fn program_id_arg(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        Self::grid_arg(cr, op, LAUNCH_GRID_RANK)
+    }
+
+    /// `GetNumProgramsConverter`：所在函数倒数第 6 − axis 个参数。
+    #[convert("tt.get_num_programs", when = args)]
+    fn num_programs_arg(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        Self::grid_arg(cr, op, 2 * LAUNCH_GRID_RANK)
     }
 
     #[convert("arith.constant")]
@@ -480,6 +520,21 @@ impl Tt {
         let d = OpData::build(Kind::TensorExpandShape.name()).operands(&[src]).with("reassociation", Reassoc::attr(groups)).with("static_output_shape", dense_i64(&L::dims(&rt)));
         let e = cr.rw.create(d, &[rt]);
         cr.rw.body[e].results[0]
+    }
+
+    /// 网格参数：所在函数（`FunctionOpInterface`）的参数里从末尾数 `from_end` 个起、第 axis 个。
+    fn grid_arg(cr: &mut Cr<'_, '_, '_>, op: OpId, from_end: usize) -> bool {
+        let b = &*cr.rw.body;
+        let axis = b.int_attr(op, "axis").unwrap_or(0) as usize;
+        let mut at = b.parent_op(op);
+        while let Some(p) = at.filter(|p| !matches!(b.kind(*p), Some(Kind::TtFunc | Kind::FuncFunc))) {
+            at = b.parent_op(p);
+        }
+        let Some(f) = at else { return false };
+        let args = b[b.entry(f, 0)].args.to_vec();
+        let Some(&id) = args.len().checked_sub(from_end).and_then(|i| args.get(i + axis)) else { return false };
+        cr.replace_values(op, &[id]);
+        true
     }
 
     fn grid(cr: &mut Cr<'_, '_, '_>, op: OpId, k: Kind) -> bool {
@@ -713,12 +768,40 @@ impl TritonArithToLinalg {
         t.dialect("arith", dynamic());
         t.dialect("math", dynamic());
         t.legal_op("builtin.module").legal_op(Kind::TtFunc.name()).legal_op(Kind::TtReturn.name());
-        if GridEncoding::try_from(self.grid.as_str()) == Ok(GridEncoding::Gpu) {
+        if self.pids_to_func_args || self.pids_to_gpu {
             t.illegal_op(Kind::TtGetProgramId.name()).illegal_op(Kind::TtGetNumPrograms.name());
         }
         t.dynamic_op(Kind::TtAddptr.name(), |b, op| Some(!matches!(b.ty(b.res(op, 0)), Type::Shaped(_))));
         t.dynamic_op(Kind::TtBitcast.name(), |b, op| Some(matches!(b.ty(b.res(op, 0)).element_type(), Type::Extended(e) if e.name == "tt.ptr")));
         t
+    }
+
+    /// `addProgramInfo`：函数类型与入口块末尾追加 6 个 i32（num_programs ×3，program_id ×3；块参数取函数的位置），
+    /// 有参数属性时补 6 个空的；`sys` 时这 6 个各带 `dope.sys`（后备写法 B′）。
+    fn add_program_info<'a>(b: &mut Body<'a>, f: OpId, sys: bool) {
+        const NAMES: [&str; 6] = ["num_programs_x", "num_programs_y", "num_programs_z", "program_id_x", "program_id_y", "program_id_z"];
+        let Some(Attribute::Type(Type::Function(ft))) = b[f].get("function_type").cloned() else { return };
+        let first = ft.inputs.len();
+        let mut inputs = ft.inputs.clone();
+        inputs.extend(std::iter::repeat_n(Type::int(32), NAMES.len()));
+        b[f].set("function_type", Attribute::Type(Type::Function(FunctionType { inputs, results: ft.results.clone() })));
+        let mut attrs = match b[f].get("arg_attrs") {
+            Some(Attribute::Array(xs)) => Some(xs.clone()),
+            _ => None,
+        };
+        if sys && attrs.is_none() {
+            attrs = Some(vec![Attribute::Dict(Vec::new()); first]);
+        }
+        if let Some(mut xs) = attrs {
+            xs.extend(NAMES.iter().map(|n| if sys { Attribute::Dict(vec![NamedAttr { name: "dope.sys".into(), value: Some(Attribute::str(n)) }]) } else { Attribute::Dict(Vec::new()) }));
+            b[f].set("arg_attrs", Attribute::Array(xs));
+        }
+        let loc = b[f].loc.clone();
+        let entry = b.entry(f, 0);
+        for _ in NAMES {
+            let a = b.add_arg(entry, Type::int(32));
+            b[a].loc.clone_from(&loc);
+        }
     }
 
     /// tt.func ⇒ func.func，tt.return ⇒ func.return。
@@ -770,8 +853,9 @@ impl TritonArithToLinalg {
 
 impl Run for TritonArithToLinalg {
     fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-        if GridEncoding::try_from(self.grid.as_str())? == GridEncoding::Args {
-            return Err(Error::from("triton-arith-to-linalg：后备写法 B′（grid-encoding=args）还没移植"));
+        if self.pids_to_func_args && self.pids_to_gpu {
+            body.emit_error(op, "pids-to-func-args 与 pids-to-gpu 只能取一个");
+            return Err(Error::from("triton-arith-to-linalg：选项冲突"));
         }
         let region = body[op].regions[0];
         let mut minmax = PatternSet::default();
@@ -779,11 +863,20 @@ impl Run for TritonArithToLinalg {
         body.apply_greedily(region, &minmax, &GreedyConfig::default());
         let target = self.target();
         let mut patterns = ConversionPatterns::default();
-        Tt::populate(&mut patterns);
+        Tt::populate(&mut patterns, self.pids_to_gpu, self.pids_to_func_args);
+        if self.pids_to_func_args {
+            let top = body.top_block(op);
+            let funcs: Vec<OpId> = body.block_ops(top).into_iter().filter(|f| body.is(*f, Kind::TtFunc)).collect();
+            for f in funcs {
+                Self::add_program_info(body, f, self.dope_sys_attrs);
+            }
+        }
         patterns.add(Elementwise);
         Converter::new(&target, &patterns, ConversionConfig::default()).apply(body, &[op], Mode::Partial)?;
         body.apply_greedily(region, &PatternSet::default(), &GreedyConfig::default());
-        Self::to_func(body, op);
+        if self.tt_to_func_func {
+            Self::to_func(body, op);
+        }
         Ok(())
     }
 }

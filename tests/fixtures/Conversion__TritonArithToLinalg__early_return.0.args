@@ -1,4 +1,4 @@
 --triton-to-structured
 --canonicalize
 --cse
---triton-arith-to-linalg=grid-encoding=args
+--triton-arith-to-linalg

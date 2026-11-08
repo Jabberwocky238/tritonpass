@@ -1,2 +1,2 @@
 --split-input-file
---triton-arith-to-linalg=grid-encoding=args
+--triton-arith-to-linalg

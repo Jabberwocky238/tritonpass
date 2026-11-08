@@ -1,1 +1,1 @@
---triton-arith-to-linalg=grid-encoding=gpu
+--triton-arith-to-linalg=pids-to-func-args=false pids-to-gpu=true
