@@ -9,45 +9,52 @@
 //! 改写过就跑一遍 canonicalize（折掉留下的常量 select、取反）；什么都没改就不碰 IR。
 use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Error, Type};
-use mlirpass::{Body, Def, OpData, OpId, PassManager, Passes, ValueId, pass};
+use mlirpass::{Body, Def, OpData, OpId, PassManager, Passes, PatternSet, Rewriter, ValueId, pass, patterns};
 
-use crate::ir::{Cursor, dense_i32, int, integer};
+use crate::ir::{TtBuilder, dense_i32, int, integer};
 use crate::{Ir, Kind};
 
 const MAX_DEPTH: u32 = 8;
 
 #[pass("triton-fold-uniform-lanes", on = "builtin.module", ty = FoldUniformLanes)]
 pub fn fold_uniform_lanes<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    let (mut divs, mut rems, mut cmps) = (Vec::new(), Vec::new(), Vec::new());
-    body.walk_post(op, &mut |o| match body.kind(o) {
-        Some(Kind::ArithDivsi) => divs.push(o),
-        Some(Kind::ArithRemsi) => rems.push(o),
-        Some(Kind::ArithCmpi) => cmps.push(o),
-        _ => {}
-    });
+    // 四步各一遍 walk（divsi、remsi、cmpi、load），后一步看得到前一步折出来的 arange
     let mut changed = false;
-    for o in divs {
-        changed |= Lanes::fold_div(body, o);
-    }
-    for o in rems {
-        changed |= Lanes::fold_rem(body, o);
-    }
-    for o in cmps {
-        changed |= Lanes::fold_compare(body, o);
-    }
-    let mut loads = Vec::new();
-    body.walk_post(op, &mut |o| {
-        if body.is(o, Kind::TtLoad) {
-            loads.push(o);
-        }
-    });
-    for o in loads {
-        changed |= Lanes::fold_load(body, o);
+    for add in [|s: &mut PatternSet| { s.add(FoldDiv); }, |s: &mut PatternSet| { s.add(FoldRem); }, |s: &mut PatternSet| { s.add(FoldCompare); }, |s: &mut PatternSet| { s.add(FoldLoad); }] {
+        let mut set = PatternSet::default();
+        add(&mut set);
+        changed |= body.walk_and_apply(op, &set);
     }
     if changed {
         Canon::run(body, op)?;
     }
     Ok(())
+}
+
+/// 四条折叠。
+pub struct LaneRules;
+
+#[patterns]
+impl LaneRules {
+    #[rewrite("arith.divsi")]
+    fn fold_div(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Lanes::fold_div(rw, op)
+    }
+
+    #[rewrite("arith.remsi")]
+    fn fold_rem(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Lanes::fold_rem(rw, op)
+    }
+
+    #[rewrite("arith.cmpi")]
+    fn fold_compare(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Lanes::fold_compare(rw, op)
+    }
+
+    #[rewrite("tt.load")]
+    fn fold_load(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Lanes::fold_load(rw, op)
+    }
 }
 
 /// 跑本 crate 的 canonicalize（认得 tt）。
@@ -164,13 +171,15 @@ impl Lanes {
         l.base.is_none_or(|a| Self::non_negative(b, a, 0) && Self::multiple_of(b, a, c, 0))
     }
 
-    fn fold_div(b: &mut Body<'_>, op: OpId) -> bool {
+    fn fold_div(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let b = &*rw.body;
         let (Some(c), Some(l)) = (Self::splat_constant(b, b.opd(op, 1)), Self::lane(b, b.opd(op, 0), 0)) else { return false };
         if !Self::aligned(b, &l, c) {
             return false;
         }
         let ty = b.ty(b.res(op, 0)).clone();
-        let mut k = Cursor::before(b, op);
+        rw.set_before(op);
+        let k = &mut *rw;
         let mut total = l.base.map(|a| {
             let cv = k.i32(c);
             k.binary(Kind::ArithDivsi, a, cv)
@@ -184,24 +193,27 @@ impl Lanes {
             });
         }
         let splat = k.value(Kind::TtSplat, &[total.expect("有值")], ty);
-        b.replace_op(op, &[splat]);
+        k.replace_op(op, &[splat]);
         true
     }
 
-    fn fold_rem(b: &mut Body<'_>, op: OpId) -> bool {
+    fn fold_rem(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let b = &*rw.body;
         let (Some(c), Some(l)) = (Self::splat_constant(b, b.opd(op, 1)), Self::lane(b, b.opd(op, 0), 0)) else { return false };
         if !Self::aligned(b, &l, c) {
             return false;
         }
         let ty = b.ty(b.res(op, 0)).clone();
         let start = l.start % c;
-        let mut k = Cursor::before(b, op);
+        rw.set_before(op);
+        let k = &mut *rw;
         let r = k.value_with(Kind::TtMakeRange, &[], &[("end", Attribute::of_int(i128::from(start + l.count), int(32))), ("start", Attribute::of_int(i128::from(start), int(32)))], ty);
-        b.replace_op(op, &[r]);
+        k.replace_op(op, &[r]);
         true
     }
 
-    fn fold_compare(b: &mut Body<'_>, op: OpId) -> bool {
+    fn fold_compare(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let b = &*rw.body;
         let Some(c) = Self::splat_constant(b, b.opd(op, 1)) else { return false };
         let Some(range) = b.def_of(b.opd(op, 0), Kind::TtMakeRange) else { return false };
         let ty = b.ty(b.res(op, 0)).clone();
@@ -219,13 +231,15 @@ impl Lanes {
             _ => None,
         };
         let Some(all) = all else { return false };
-        let mut k = Cursor::before(b, op);
-        let v = k.constant(integer(1, i128::from(all)), ty);
-        b.replace_op(op, &[v]);
+        rw.set_before(op);
+        let k = &mut *rw;
+        let v = k.scalar(integer(1, i128::from(all)), ty);
+        k.replace_op(op, &[v]);
         true
     }
 
-    fn fold_load(b: &mut Body<'_>, op: OpId) -> bool {
+    fn fold_load(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let b = &*rw.body;
         if b[op].operands.len() != 1 {
             return false;
         }
@@ -239,7 +253,8 @@ impl Lanes {
         let p_ty = b.ty(p).clone();
         let elem = ty.element_type().clone();
         let attrs: Vec<(&str, Attribute<'_>)> = ["cache", "evict", "isVolatile"].iter().filter_map(|n| b[op].get(n).map(|a| (*n, a.clone()))).collect();
-        let mut k = Cursor::before(b, op);
+        rw.set_before(op);
+        let k = &mut *rw;
         let sp = k.value(Kind::TtAddptr, &[p, s], p_ty);
         let mut d = OpData::build(Kind::TtLoad.name()).operands(&[sp]).with("boundaryCheck", dense_i32(&[])).with("operandSegmentSizes", dense_i32(&[1, 0, 0]));
         for (n, a) in attrs {
@@ -248,7 +263,7 @@ impl Lanes {
         let l = k.create(d, &[elem]);
         let lv = k.body.res(l, 0);
         let splat = k.value(Kind::TtSplat, &[lv], ty);
-        b.replace_op(op, &[splat]);
+        k.replace_op(op, &[splat]);
         true
     }
 }
