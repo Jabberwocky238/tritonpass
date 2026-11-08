@@ -3,47 +3,65 @@
 //! `tensor.collapse_shape`。任何窗口要留单位维当载体（偏移没地方落）时整个 kernel 不动、记 `dope.keep_unit_dims`
 //! （拆过行轴的 kernel 只跳过那个窗口）。
 use mlirformat::{Attribute, Error, Type};
-use mlirpass::{Body, OpData, OpId, ValueId, pass};
+use mlirpass::{Body, OpData, OpId, PatternSet, Rewriter, ValueId, pass, patterns};
 
-use super::ofr::Ofr;
+use super::ofr::{Ofr, OfrBuilder};
 use super::window::{Tptr, Window};
-use crate::ir::{Cursor, dense_i32, dense_i64, dense_values, i64_attr};
+use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values, i64_attr};
 use crate::{Ir, Kind};
 
 #[pass("triton-squeeze-unit-dims", on = "builtin.module", ty = SqueezeUnitDims)]
 pub fn squeeze_unit_dims<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
     let split = body[op].get(Squeeze::SPLIT).is_some();
     body[op].remove(Squeeze::SPLIT);
+    // 整个 kernel 一起判：有窗口要留单位维当载体（拆过行轴的 kernel 只跳过那个窗口）就整个不动
     let mut accesses = Vec::new();
     body.walk_post(op, &mut |o| {
         if matches!(body.kind(o), Some(Kind::TtsLoad | Kind::TtsStore)) {
             accesses.push(o);
         }
     });
-    let window = |b: &Body<'_>, a: OpId| b.def_of(b.opd(a, 0), Kind::TtsMakeTptr).map(|m| (m, Tptr::of(b, m)));
-    for &a in &accesses {
-        let Some((_, t)) = window(body, a) else { continue };
-        let drop = Squeeze::droppable(body, &t);
-        if !drop.is_empty() && Squeeze::needs_carrier(body, &t, &drop) {
-            if split {
-                continue;
+    if !split {
+        for &a in &accesses {
+            let Some((_, t)) = Squeeze::window(body, a) else { continue };
+            let drop = Squeeze::droppable(body, &t);
+            if !drop.is_empty() && Squeeze::needs_carrier(body, &t, &drop) {
+                body[op].set(Squeeze::KEEP, Attribute::Unit);
+                return Ok(());
             }
-            body[op].set(Squeeze::KEEP, Attribute::Unit);
-            return Ok(());
         }
     }
-    for a in accesses {
-        let Some((make, t)) = window(body, a) else { continue };
-        let drop = Squeeze::droppable(body, &t);
-        if drop.is_empty() || (split && Squeeze::needs_carrier(body, &t, &drop)) {
-            continue;
-        }
-        Squeeze { drop: &drop, t: &t }.rewrite(body, a);
-        if body[body.res(make, 0)].uses.is_empty() {
-            body.erase(make);
-        }
-    }
+    let mut set = PatternSet::default();
+    SqueezeRules::patterns(&mut set, split);
+    body.walk_and_apply(op, &set);
     Ok(())
+}
+
+/// 每次读写一条改写：丢掉窗口里 size 1、行距 0 的维。
+pub struct SqueezeRules;
+
+#[patterns(split: bool)]
+impl SqueezeRules {
+    #[rewrite("tts.load", when = !split)]
+    fn squeeze_load(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Squeeze::apply(rw, op, false)
+    }
+
+    #[rewrite("tts.store", when = !split)]
+    fn squeeze_store(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Squeeze::apply(rw, op, false)
+    }
+
+    /// 拆过行轴的 kernel：要留载体的窗口跳过。
+    #[rewrite("tts.load", when = split)]
+    fn squeeze_load_split(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Squeeze::apply(rw, op, true)
+    }
+
+    #[rewrite("tts.store", when = split)]
+    fn squeeze_store_split(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        Squeeze::apply(rw, op, true)
+    }
 }
 
 struct Squeeze<'d> {
@@ -54,6 +72,24 @@ struct Squeeze<'d> {
 impl Squeeze<'_> {
     const SPLIT: &'static str = "dope.split_row_axis";
     const KEEP: &'static str = "dope.keep_unit_dims";
+
+    fn window(b: &Body<'_>, a: OpId) -> Option<(OpId, Tptr)> {
+        b.def_of(b.opd(a, 0), Kind::TtsMakeTptr).map(|m| (m, Tptr::of(b, m)))
+    }
+
+    /// 改写一次读写；窗口用完就擦掉。
+    fn apply(rw: &mut Rewriter<'_, '_>, a: OpId, split: bool) -> bool {
+        let Some((make, t)) = Self::window(rw.body, a) else { return false };
+        let drop = Self::droppable(rw.body, &t);
+        if drop.is_empty() || (split && Self::needs_carrier(rw.body, &t, &drop)) {
+            return false;
+        }
+        Squeeze { drop: &drop, t: &t }.rewrite(rw, a);
+        if rw.body[rw.body.res(make, 0)].uses.is_empty() {
+            rw.erase_op(make);
+        }
+        true
+    }
 
     /// 要丢的维：size 为 1 且静态行距为 0；全是这样的维时留最后一维。
     fn droppable(b: &Body<'_>, t: &Tptr) -> Vec<usize> {
@@ -76,7 +112,7 @@ impl Squeeze<'_> {
     }
 
     /// 去掉丢的维：偏移加进第一个留下的维（`fold` 是加还是乘）。
-    fn fold(&self, c: &mut Cursor<'_, '_>, xs: &[Ofr], mul: bool) -> Vec<Ofr> {
+    fn fold(&self, c: &mut Rewriter<'_, '_>, xs: &[Ofr], mul: bool) -> Vec<Ofr> {
         let mut carried = Ofr::idx(i64::from(mul));
         for &d in self.drop {
             carried = if mul { c.mul_ofr(carried, xs[d]) } else { c.add_ofr(carried, xs[d]) };
@@ -126,7 +162,8 @@ impl Squeeze<'_> {
         (dims.iter().filter_map(|d| d.value()).collect(), dims.iter().map(|d| d.static_value()).collect())
     }
 
-    fn rewrite(&self, b: &mut Body<'_>, op: OpId) {
+    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) {
+        let b = &*rw.body;
         let t = self.t;
         let load = b.is(op, Kind::TtsLoad);
         let n = dense_values(b[op].get("static_mask_dims")).len();
@@ -143,15 +180,16 @@ impl Squeeze<'_> {
         let full_dims = full_ty.dims().unwrap_or_default();
         let rank = t.sizes.len();
         let re = self.reassociation(rank);
-        let mut c = Cursor::before(b, op);
-        let offsets = self.fold(&mut c, &t.offsets, false);
+        rw.set_before(op);
+        let c = &mut *rw;
+        let offsets = self.fold(c, &t.offsets, false);
         let sizes = self.kept(&t.sizes);
         let strides = self.kept(&t.strides);
         let base_ty = c.body.ty(t.base).clone();
         let to = |xs: &[Ofr]| xs.iter().map(|o| crate::ir::Ofr::from(*o)).collect::<Vec<_>>();
         let shape = vec![crate::ir::Ofr::C(0); sizes.len()];
         let ptr = c.make_tptr(t.base, &sizes, &to(&strides), &to(&offsets), &shape, &[], Type::tensor(&sizes, base_ty));
-        let mask = if mask.is_empty() { mask } else { self.fold(&mut c, &mask, true) };
+        let mask = if mask.is_empty() { mask } else { self.fold(c, &mask, true) };
         let (dynd, statd) = Self::split_dims(&mask);
         let small = Type::tensor(&self.kept(&full_dims), full_ty.element_type().owned());
         if load {
@@ -164,7 +202,7 @@ impl Squeeze<'_> {
             let e = OpData::build(Kind::TensorExpandShape.name()).operands(&[lv]).with("reassociation", re).with("static_output_shape", dense_i64(&full_dims));
             let e = c.create(e, &[full_ty]);
             let ev = c.body.res(e, 0);
-            b.replace_op(op, &[ev]);
+            c.replace_op(op, &[ev]);
         } else {
             let col = OpData::build(Kind::TensorCollapseShape.name()).operands(&[ops[1]]).with("reassociation", re);
             let col = c.create(col, &[small]);
@@ -172,7 +210,7 @@ impl Squeeze<'_> {
             let mut operands = vec![ptr, cv];
             operands.extend(&dynd);
             c.create(OpData::build(Kind::TtsStore.name()).operands(&operands).with("static_mask_dims", dense_i64(&statd)), &[]);
-            b.erase(op);
+            c.erase_op(op);
         }
     }
 }
