@@ -10,20 +10,31 @@ use mlirpass::{Body, OpData, OpId, PassManager, Passes, ValueId, pass};
 use crate::ir::{Cursor, dense_i32, int, integer};
 use crate::{Ir, Kind};
 
-#[pass("triton-to-unstructured", on = "builtin.module", ty = TritonToUnstructured)]
-pub fn triton_to_unstructured<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    if !Unstructured::default().process(body, op) {
-        return Ok(());
+/// 选项同 triton-shared 的 `Passes.td`。
+#[pass("triton-to-unstructured", on = "builtin.module")]
+pub struct TritonToUnstructured {
+    /// 每个指针起始偏移的位宽
+    #[opt("offset-bit-width", default = 32)]
+    offset_bits: u32,
+}
+
+impl mlirpass::Run for TritonToUnstructured {
+    fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
+        if !(Unstructured { bits: self.offset_bits, ..Unstructured::default() }).process(body, op) {
+            return Ok(());
+        }
+        let mut passes = Passes::new();
+        passes.register::<mlirpass::Canonicalize>().register::<mlirpass::Cse>();
+        PassManager::parse(&passes, &format!("{}(canonicalize, cse)", body[op].name))?.run_on(body, op, &moremath::ThreadSingle)
     }
-    let mut passes = Passes::new();
-    passes.register::<mlirpass::Canonicalize>().register::<mlirpass::Cse>();
-    PassManager::parse(&passes, &format!("{}(canonicalize, cse)", body[op].name))?.run_on(body, op, &moremath::ThreadSingle)
 }
 
 #[derive(Default)]
 struct Unstructured {
     /// 值 ⇒（基址, 指针类型, 位宽, 偏移）
     map: BTreeMap<ValueId, (ValueId, Type<'static>, u32, ValueId)>,
+    /// `offset-bit-width`
+    bits: u32,
 }
 
 fn ptr_like(t: &Type<'_>) -> bool {
@@ -41,7 +52,7 @@ fn offset_type(t: &Type<'_>, bits: u32) -> Type<'static> {
 impl Unstructured {
     #[allow(clippy::too_many_lines)]
     fn process(&mut self, b: &mut Body<'_>, root: OpId) -> bool {
-        const DEFAULT_BITS: u32 = 32;
+        let default_bits = self.bits;
         let mut args: BTreeSet<ValueId> = BTreeSet::new();
         let mut work: VecDeque<ValueId> = VecDeque::new();
         let mut funcs = Vec::new();
@@ -58,10 +69,10 @@ impl Unstructured {
                 }
                 let loc = b[a].loc.clone();
                 let mut c = Cursor::start(b, entry, loc);
-                let zero = c.constant(integer(DEFAULT_BITS, 0), int(DEFAULT_BITS));
+                let zero = c.constant(integer(default_bits, 0), int(default_bits));
                 args.insert(a);
                 let t = b.ty(a).owned();
-                self.map.entry(a).or_insert((a, t, DEFAULT_BITS, zero));
+                self.map.entry(a).or_insert((a, t, default_bits, zero));
                 work.push_back(a);
             }
         }
@@ -73,10 +84,10 @@ impl Unstructured {
         });
         for o in i2p {
             let mut c = Cursor::before(b, o);
-            let zero = c.constant(integer(DEFAULT_BITS, 0), int(DEFAULT_BITS));
+            let zero = c.constant(integer(default_bits, 0), int(default_bits));
             let r = b.res(o, 0);
             let t = b.ty(r).owned();
-            self.map.entry(r).or_insert((r, t, DEFAULT_BITS, zero));
+            self.map.entry(r).or_insert((r, t, default_bits, zero));
             work.push_back(r);
         }
         let mut to_delete: Vec<OpId> = Vec::new();
