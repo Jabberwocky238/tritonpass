@@ -146,8 +146,36 @@ impl L {
 /// tt 张量 op 的转换模式。
 struct Tt;
 
-#[patterns(gpu: bool, args: bool)]
+#[patterns(gpu: bool, args: bool, addptr: bool, tensor_ptr: bool)]
 impl Tt {
+    /// `StorePtrToLinalgConverter`（tensor-ptr-to-linalg）：指针张量上的 tt.store ⇒ 包着标量 tt.store 的 linalg.generic，没有 out。
+    #[convert("tt.store", when = tensor_ptr)]
+    fn store_ptr(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        let b = &*cr.rw.body;
+        if !matches!(b.ty(b.opd(op, 1)), Type::Shaped(_)) {
+            return false;
+        }
+        Self::scalar_in_generic(cr, op, Vec::new())
+    }
+
+    /// `TensorOpConverter<LoadOp / IntToPtrOp / PtrToIntOp / BitcastOp>`（tensor-ptr-to-linalg）：out 是一块 tensor.empty。
+    #[convert("tt.load", "tt.int_to_ptr", "tt.ptr_to_int", "tt.bitcast", when = tensor_ptr)]
+    fn tensor_op(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        let rt = L::rty(cr, op);
+        if !matches!(rt, Type::Shaped(_)) {
+            return false;
+        }
+        let init = cr.empty(&L::dims(&rt), rt.element_type().clone(), &[]);
+        Self::scalar_in_generic(cr, op, vec![init])
+    }
+
+    /// `AddPtrConverter`（addptr-to-linalg）：张量上的 tt.addptr ⇒ 包着标量 tt.addptr 的 linalg.generic，out 就是指针操作数。
+    #[convert("tt.addptr", when = addptr)]
+    fn addptr(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        let ptr = cr.rw.body.opd(op, 0);
+        Self::scalar_in_generic(cr, op, vec![ptr])
+    }
+
     #[convert("tt.splat")]
     fn splat(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let t = L::rty(cr, op);
@@ -522,6 +550,34 @@ impl Tt {
         cr.rw.body[e].results[0]
     }
 
+    /// 指针张量上的 op ⇒ `linalg.generic`：各维 parallel、映射全是恒等，体里是同名同属性的标量 op（照 C++，操作数用原 op 的，
+    /// 不用转换之后的），结果按元素类型。
+    fn scalar_in_generic(cr: &mut Cr<'_, '_, '_>, op: OpId, outputs: Vec<ValueId>) -> bool {
+        let b = &*cr.rw.body;
+        let inputs = b[op].operands.to_vec();
+        let rts: Vec<Type<'_>> = b[op].results.iter().map(|r| b.ty(*r).clone()).collect();
+        let shaped = rts.first().map_or_else(|| b.ty(*inputs.last().expect("有操作数")).clone(), Clone::clone);
+        let rank = L::dims(&shaped).len() as u32;
+        let maps = vec![AffineMap::identity(rank); inputs.len() + outputs.len().max(rts.len())];
+        let ets: Vec<Type<'_>> = rts.iter().map(|t| t.element_type().clone()).collect();
+        let (name, properties, attributes) = (b[op].name.clone(), b[op].properties.clone(), b[op].attributes.clone());
+        let n = inputs.len();
+        let g = cr.generic(&rts, &inputs, &outputs, &maps, &vec![true; rank as usize], &mut |cr, a| {
+            let mut d = OpData::named(name.clone()).operands(&a[..n]);
+            d.properties.clone_from(&properties);
+            d.attributes.clone_from(&attributes);
+            let o = cr.rw.create(d, &ets);
+            cr.rw.body[o].results.to_vec()
+        });
+        let rs = cr.rw.body[g].results.to_vec();
+        if rs.is_empty() {
+            cr.rw.erase_op(op);
+        } else {
+            cr.replace_values(op, &rs);
+        }
+        true
+    }
+
     /// 网格参数：所在函数（`FunctionOpInterface`）的参数里从末尾数 `from_end` 个起、第 axis 个。
     fn grid_arg(cr: &mut Cr<'_, '_, '_>, op: OpId, from_end: usize) -> bool {
         let b = &*cr.rw.body;
@@ -771,8 +827,24 @@ impl TritonArithToLinalg {
         if self.pids_to_func_args || self.pids_to_gpu {
             t.illegal_op(Kind::TtGetProgramId.name()).illegal_op(Kind::TtGetNumPrograms.name());
         }
-        t.dynamic_op(Kind::TtAddptr.name(), |b, op| Some(!matches!(b.ty(b.res(op, 0)), Type::Shaped(_))));
-        t.dynamic_op(Kind::TtBitcast.name(), |b, op| Some(matches!(b.ty(b.res(op, 0)).element_type(), Type::Extended(e) if e.name == "tt.ptr")));
+        if self.addptr_to_linalg {
+            t.dynamic_op(Kind::TtAddptr.name(), |b, op| Some(!matches!(b.ty(b.res(op, 0)), Type::Shaped(_))));
+        }
+        let ptr_like = |t: &Type<'_>| matches!(t.element_type(), Type::Extended(e) if e.name == "tt.ptr");
+        if self.tensor_ptr_to_linalg {
+            t.dynamic_op(Kind::TtBitcast.name(), move |b, op| {
+                let ty = b.ty(b.res(op, 0));
+                Some(ptr_like(ty) && !matches!(ty, Type::Shaped(_)))
+            });
+            for k in [Kind::TtLoad, Kind::TtStore, Kind::TtIntToPtr, Kind::TtPtrToInt] {
+                t.dynamic_op(k.name(), |b, op| Some(!matches!(b.ty(b.opd(op, 0)), Type::Shaped(_))));
+            }
+        } else {
+            t.dynamic_op(Kind::TtBitcast.name(), move |b, op| Some(ptr_like(b.ty(b.res(op, 0)))));
+        }
+        if !self.assert_to_cf {
+            t.legal_op(Kind::TtAssert.name());
+        }
         t
     }
 
@@ -863,7 +935,7 @@ impl Run for TritonArithToLinalg {
         body.apply_greedily(region, &minmax, &GreedyConfig::default());
         let target = self.target();
         let mut patterns = ConversionPatterns::default();
-        Tt::populate(&mut patterns, self.pids_to_gpu, self.pids_to_func_args);
+        Tt::populate(&mut patterns, self.pids_to_gpu, self.pids_to_func_args, self.addptr_to_linalg, self.tensor_ptr_to_linalg);
         if self.pids_to_func_args {
             let top = body.top_block(op);
             let funcs: Vec<OpId> = body.block_ops(top).into_iter().filter(|f| body.is(*f, Kind::TtFunc)).collect();
