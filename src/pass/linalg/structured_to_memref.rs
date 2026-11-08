@@ -309,9 +309,8 @@ impl NoTc {
     }
 }
 
-/// `tts.make_gather_scatter_tptr` 读出来的样子：基指针（转换前）、按行取的偏移张量与 mask、gather 维、各维尺寸、行距、偏移。
+/// `tts.make_gather_scatter_tptr` 读出来的样子：按行取的偏移张量与 mask、gather 维、各维尺寸、行距、偏移。
 struct GatherScatter {
-    base: ValueId,
     offset: ValueId,
     mask: Option<ValueId>,
     dim: usize,
@@ -331,7 +330,6 @@ impl GatherScatter {
         let offsets = Tptr::mixed(b, op, "static_offsets", &ops[2 + ns..2 + ns + no]);
         let mask = (n(4) > 0).then(|| ops[2 + ns + no]);
         Self {
-            base: ops[0],
             offset: ops[1],
             mask,
             dim: b.int_attr(op, "gather_scatter_dim").unwrap_or(0) as usize,
@@ -380,7 +378,7 @@ impl GatherScatter {
     /// 偏移转成 index、循环上界（mask 收窄）、空循环与（有非结构化 mask 时）其中的 scf.if；插入点留在体的开头（或 then 里）。
     /// 返回（循环，0，1，归纳变量，偏移张量，各维尺寸）。
     #[expect(clippy::type_complexity, reason = "几样一起交出")]
-    fn begin(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, mask: Option<Vec<Ofr>>) -> (OpId, ValueId, ValueId, ValueId, ValueId, Vec<Ofr>) {
+    fn begin(&self, cr: &mut Cr<'_, '_, '_>, mask: Option<Vec<Ofr>>) -> (OpId, ValueId, ValueId, ValueId, ValueId, Vec<Ofr>) {
         let ot = cr.rw.body.ty(self.offset).clone();
         let oshape = ot.dims().unwrap_or_default();
         let mut size = oshape[0];
@@ -445,7 +443,7 @@ impl GatherScatter {
         if let Some(x) = other {
             NoTc::fill(cr, x, alloc);
         }
-        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, op, mask.clone());
+        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, mask.clone());
         let tv = Mem::create(cr, OpData::build(Kind::BufferizationToTensor.name()).operands(&[alloc]).with("restrict", Attribute::Unit).with("writable", Attribute::Unit), rt);
         cr.replace_values(op, &[tv]);
         self.enter(cr, l, iv);
@@ -470,7 +468,7 @@ impl GatherScatter {
     /// `StoreConverter::rewriteScatter`。
     fn store(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, memref: ValueId, value: ValueId) -> bool {
         let mask = NoTc::mask(cr.rw.body, op, false);
-        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, op, mask.clone());
+        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, mask.clone());
         let _ = l;
         self.enter(cr, l, iv);
         let elt = Mem::create(cr, OpData::build(Kind::TensorExtract.name()).operands(&[offset, iv]), Type::Index);

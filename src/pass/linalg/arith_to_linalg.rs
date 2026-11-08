@@ -39,7 +39,8 @@ pub struct TritonArithToLinalg {
     /// 指针张量上的 tt op ⇒ linalg.generic
     #[opt("tensor-ptr-to-linalg")]
     tensor_ptr_to_linalg: bool,
-    /// 归约转置到 rank 0（dope：转置已去掉，两种取值都沿原轴归约）
+    /// 归约转置到 rank 0（dope：转置已去掉，两种取值都沿原轴归约，收下选项不改行为）
+    #[allow(dead_code, reason = "dope 分叉里两种取值行为相同")]
     #[opt("transpose-reduce-to-rank0", default = true)]
     transpose_reduce_to_rank0: bool,
 }

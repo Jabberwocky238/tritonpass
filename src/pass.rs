@@ -6,8 +6,6 @@ mod binary_search;
 mod canon;
 #[path = "pass/carried_buffers.rs"]
 mod carried_buffers;
-#[path = "pass/cfg_to_scf.rs"]
-mod cfg_to_scf;
 #[path = "pass/drops.rs"]
 mod drops;
 #[path = "pass/iota_integers.rs"]

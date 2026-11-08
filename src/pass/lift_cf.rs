@@ -2,17 +2,59 @@
 //!
 //! 多块的 tt.func（cf 分支，常见写法是复合布尔条件的早退）结构化成单块、用 scf.if 表达分支；只在完全成功（一个 cf.* 都不剩）
 //! 时才留下结果，否则回滚、原样留给 P0 按「函数体必须单块」点名拒收。C++ 原版借一个临时 func.func 跑上游原版 pass
-//! （上游写死了 func.return）；这里直接在 tt.func 上跑移植来的同一个算法（[`CfgToScf`]），用检查点回滚代替副本。
+//! （上游写死了 func.return）；这里直接在 tt.func 上跑 mlirpass 的 `transform_cfg_to_scf`（不可达出口换成 tt.return），用检查点回滚代替副本。
 //!
 //! 多出口的 tt.func 结构化之后，末尾留下纯选择器的死链（零结果、分支皆空的 scf.index_switch，喂给它的 scf.if、
 //! index_castui）：`triton-drop-dead-exit-switch` 只清这一条特定的链（⛔ 通用 canonicalize：会连带吃掉本该被 P0 点名的死值）。
-use mlirformat::Error;
-use mlirpass::{Body, OpData, OpId, PatternSet, Rewriter, pass, patterns};
+use mlirformat::{Attribute, Error, Str, Type};
+use mlirpass::{BlockId, Body, CfgAt, CfgToScfInterface, ControlFlowToScf, OpData, OpId, PatternSet, RegionId, Rewriter, ValueId, pass, patterns, transform_cfg_to_scf};
 
-use super::cfg_to_scf::{CfgToScf, Lift};
 use crate::{Ir, Kind};
 
-/// 多块的 tt.func 结构化成单块：只在完全成功（一个 cf.* 都不剩）时留下，否则回滚到改写之前。
+/// 上游的 `ControlFlowToSCFTransformation`，只是不可达的出口是 `tt.return`（C++ 在临时 func.func 上建 func.return，再换回 tt.return）。
+struct TtControlFlowToScf(ControlFlowToScf);
+
+impl<'a> CfgToScfInterface<'a> for TtControlFlowToScf {
+    fn branch_region_op(&mut self, body: &mut Body<'a>, at: CfgAt, cond: OpId, result_types: &[Type<'a>], regions: Vec<Vec<BlockId>>) -> Result<OpId, Error> {
+        self.0.branch_region_op(body, at, cond, result_types, regions)
+    }
+
+    fn branch_region_terminator(&mut self, body: &mut Body<'a>, at: CfgAt, loc: Option<Str<'a>>, op: OpId, replaced: Option<OpId>, results: &[ValueId]) -> Result<(), Error> {
+        self.0.branch_region_terminator(body, at, loc, op, replaced, results)
+    }
+
+    fn do_while_loop(&mut self, body: &mut Body<'a>, at: CfgAt, replaced: OpId, init: &[ValueId], condition: ValueId, next: &[ValueId], loop_body: Vec<BlockId>) -> Result<OpId, Error> {
+        self.0.do_while_loop(body, at, replaced, init, condition, next, loop_body)
+    }
+
+    fn switch_value(&mut self, body: &mut Body<'a>, at: CfgAt, loc: Option<Str<'a>>, value: u32) -> ValueId {
+        self.0.switch_value(body, at, loc, value)
+    }
+
+    fn cfg_switch(&mut self, body: &mut Body<'a>, at: CfgAt, loc: Option<Str<'a>>, flag: ValueId, case_values: &[u32], case_dests: &[BlockId], case_args: &[Vec<ValueId>], default: BlockId, default_args: &[ValueId]) -> OpId {
+        self.0.cfg_switch(body, at, loc, flag, case_values, case_dests, case_args, default, default_args)
+    }
+
+    fn undef_value(&mut self, body: &mut Body<'a>, at: CfgAt, loc: Option<Str<'a>>, ty: &Type<'a>) -> ValueId {
+        self.0.undef_value(body, at, loc, ty)
+    }
+
+    fn unreachable_terminator(&mut self, body: &mut Body<'a>, at: CfgAt, loc: Option<Str<'a>>, region: RegionId) -> Result<OpId, Error> {
+        let parent = body[region].parent;
+        let results = match body[parent].get("function_type") {
+            Some(Attribute::Type(Type::Function(ft))) => ft.results.clone(),
+            _ => Vec::new(),
+        };
+        let values: Vec<ValueId> = results.iter().map(|t| self.0.undef_value(body, at, loc.clone(), t)).collect();
+        let mut d = OpData::build(Kind::TtReturn.name()).operands(&values);
+        d.loc = loc;
+        let op = body.create(d, &[]);
+        Ok(at.place(body, op))
+    }
+}
+
+/// 多块的 tt.func 结构化（`tryLift`）：函数里每个 op 的每个区域、内层先，照上游 lift-cf-to-scf；只在完全成功（一个 cf.* 都不剩）
+/// 时留下，否则回滚到改写之前（上游报的诊断留着，同 C++）。
 pub struct LiftRules;
 
 #[patterns]
@@ -24,12 +66,34 @@ impl LiftRules {
             return false;
         }
         let cp = rw.body.checkpoint();
-        let lifted = CfgToScf::run(rw.body, region) == Lift::Done && !rw.body.ops_in(f).iter().any(|o| matches!(rw.body.kind(*o), Some(Kind::CfBr | Kind::CfCondBr | Kind::CfSwitch)));
+        let mut ops = Vec::new();
+        rw.body.walk_post(f, &mut |o| ops.push(o));
+        let mut interface = TtControlFlowToScf(ControlFlowToScf);
+        let mut ok = true;
+        for o in ops {
+            if rw.body[o].parent.is_none() && o != f {
+                continue;
+            }
+            for r in rw.body[o].regions.clone() {
+                if transform_cfg_to_scf(rw.body, r, &mut interface).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                break;
+            }
+        }
+        let lifted = ok && !rw.body.ops_in(f).iter().any(|o| matches!(rw.body.kind(*o), Some(Kind::CfBr | Kind::CfCondBr | Kind::CfSwitch)));
         if lifted {
             rw.body.release(cp);
             rw.modify(f, |_| {});
         } else {
+            let diagnostics = rw.body.take_diagnostics();
             rw.body.rollback(cp);
+            for d in diagnostics {
+                rw.body.report(d);
+            }
         }
         lifted
     }
