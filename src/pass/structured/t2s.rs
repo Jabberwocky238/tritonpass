@@ -14,16 +14,45 @@ use crate::ir::{At, Cursor, dense_i32};
 use crate::pass::uniform_lanes::Canon;
 use crate::{Ir, Kind, pointee};
 
-#[pass("triton-to-structured", on = "builtin.module", ty = TritonToStructured)]
-pub fn triton_to_structured<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
-    Canon::run(body, op)?;
-    Prepass::default().run(body, op);
-    // 流水线缺省：enable-make-gather-scatter = true，enable-modulo-support = false
-    let mut pa = PtrAnalysis::new(true, false);
-    pa.init_maybe_structured(body, op);
-    pa.rewrite_ops(body, op);
-    pa.rewrite_get_states(body, op);
-    Ok(())
+/// 选项同 triton-shared 的 `Passes.td`，名字与缺省值一样（dope-opt 的产品流水线另传 `enable-modulo-support=false`）。
+#[pass("triton-to-structured", on = "builtin.module")]
+pub struct TritonToStructured {
+    /// 认不出结构的读写改用 `tts.make_gather_scatter_tptr`
+    #[opt("enable-make-gather-scatter", default = true)]
+    gather_scatter: bool,
+    /// 指针分析认取模（回绕的窗口）
+    #[opt("enable-modulo-support", default = true)]
+    modulo: bool,
+    /// 只跑 prepass（插入 scf.for 用的 `tts.get_structured_state`）
+    #[opt("run-prepass-only")]
+    prepass_only: bool,
+    /// 跳过 prepass
+    #[opt("skip-prepass")]
+    skip_prepass: bool,
+    /// 假定 mask 的上界不小于起始偏移（可能出错）
+    #[opt("use-unsafe-mask")]
+    unsafe_mask: bool,
+}
+
+impl mlirpass::Run for TritonToStructured {
+    fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
+        if self.unsafe_mask {
+            body.emit_error(op, "triton-to-structured：use-unsafe-mask 还没移植");
+            return Err(Error::from("triton-to-structured：use-unsafe-mask 还没移植"));
+        }
+        if !self.skip_prepass {
+            Canon::run(body, op)?;
+            Prepass::default().run(body, op);
+        }
+        if self.prepass_only {
+            return Ok(());
+        }
+        let mut pa = PtrAnalysis::new(self.gather_scatter, self.modulo);
+        pa.init_maybe_structured(body, op);
+        pa.rewrite_ops(body, op);
+        pa.rewrite_get_states(body, op);
+        Ok(())
+    }
 }
 
 /// 展开的状态：旧值 ⇒ 新的一组（值, 偏移…, 行距…）；初值、yield 值的 get_structured_state 按值缓存。
