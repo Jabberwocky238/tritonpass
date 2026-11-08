@@ -6,9 +6,8 @@
 use mlirformat::{Attribute, Dim, Error, Shaped, ShapedKind, StridedLayout, Type};
 use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
 
-use crate::ir::{At, Cursor, dense_i32, dense_i64, dense_values};
-use crate::pass::ofr::OfrBuilder;
-use crate::pass::ofr::Ofr;
+use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values};
+use crate::pass::ofr::{Ofr, OfrBuilder};
 use crate::pass::window::{StrideKind, Tptr, UNBOUNDED, Window};
 use crate::{Ir, Kind, pointee};
 
@@ -122,8 +121,9 @@ impl Mem {
 
     /// 窗口的各维偏移（`materializeWindowOffsets`）。
     fn offsets(cr: &mut Cr<'_, '_, '_>, op: OpId, plan: &crate::pass::window::WindowPlan) -> Vec<Ofr> {
-        let loc = cr.rw.body[op].loc.clone();
-        let mut c = Cursor { body: &mut *cr.rw.body, at: At::Before(op), loc };
+        let mut q = mlirpass::Quiet;
+        let mut c = Rewriter::new(&mut *cr.rw.body, &mut q);
+        c.before_op(op);
         Window::materialize_offsets(plan, &mut c)
     }
 }

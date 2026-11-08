@@ -5,7 +5,9 @@ use mlirformat::{Attribute, Type};
 use mlirpass::{Body, Def, ValueId};
 
 use crate::pass::ofr::Ofr;
-use crate::ir::{Cursor, int};
+use crate::ir::{TtBuilder, int};
+use crate::pass::ofr::OfrBuilder;
+use mlirpass::Rewriter;
 use crate::{Ir, Kind};
 
 #[derive(Debug, Clone, Default)]
@@ -56,7 +58,7 @@ impl MaskState {
         None
     }
 
-    pub fn parse(&mut self, v: ValueId, c: &mut Cursor<'_, '_>) -> bool {
+    pub fn parse(&mut self, v: ValueId, c: &mut Rewriter<'_, '_>) -> bool {
         let def = c.body.def_op(v);
         let k = def.and_then(|d| c.body.kind(d));
         if k == Some(Kind::ArithCmpi)
@@ -83,7 +85,7 @@ impl MaskState {
         }
     }
 
-    fn add_state_scalar(&mut self, s: &Self, scalar: Ofr, c: &mut Cursor<'_, '_>) -> bool {
+    fn add_state_scalar(&mut self, s: &Self, scalar: Ofr, c: &mut Rewriter<'_, '_>) -> bool {
         let (Some(st), Some(en)) = (s.start, s.end) else { return false };
         self.start = Some(c.add_ofr(st, scalar));
         self.end = Some(c.add_ofr(en, scalar));
@@ -91,7 +93,7 @@ impl MaskState {
         true
     }
 
-    fn add_states(&mut self, l: &Self, r: &Self, c: &mut Cursor<'_, '_>) -> bool {
+    fn add_states(&mut self, l: &Self, r: &Self, c: &mut Rewriter<'_, '_>) -> bool {
         if l.scalar.is_some() == r.scalar.is_some() {
             return false;
         }
@@ -102,7 +104,7 @@ impl MaskState {
         }
     }
 
-    fn min_state_scalar(&mut self, l: &Self, r: &Self, c: &mut Cursor<'_, '_>) -> bool {
+    fn min_state_scalar(&mut self, l: &Self, r: &Self, c: &mut Rewriter<'_, '_>) -> bool {
         if l.scalar.is_some() == r.scalar.is_some() {
             return false;
         }
@@ -114,7 +116,7 @@ impl MaskState {
         true
     }
 
-    fn min_states(&mut self, l: &Self, r: &Self, c: &mut Cursor<'_, '_>) -> bool {
+    fn min_states(&mut self, l: &Self, r: &Self, c: &mut Rewriter<'_, '_>) -> bool {
         if l.rank() != r.rank() {
             return false;
         }
@@ -125,7 +127,7 @@ impl MaskState {
         true
     }
 
-    fn parse_constant(&mut self, v: ValueId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_constant(&mut self, v: ValueId, c: &mut Rewriter<'_, '_>) -> bool {
         let b = &*c.body;
         if matches!(b.ty(v), Type::Shaped(_)) {
             let Some(k) = b.constant(v) else { return false };
@@ -146,7 +148,7 @@ impl MaskState {
         true
     }
 
-    fn parse_int_scalar(&mut self, v: ValueId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_int_scalar(&mut self, v: ValueId, c: &mut Rewriter<'_, '_>) -> bool {
         if matches!(c.body.ty(v), Type::Integer { width: 1, .. }) {
             self.scalar = Some(Ofr::V(v));
         } else {
@@ -155,7 +157,7 @@ impl MaskState {
         true
     }
 
-    fn parse_add(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_add(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let (lv, rv) = (c.body.opd(op, 0), c.body.opd(op, 1));
         let mut l = Self::default();
         if !l.parse(lv, c) {
@@ -169,7 +171,7 @@ impl MaskState {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn parse_and(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_and(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let ty = c.body.ty(c.body.res(op, 0)).clone();
         if !matches!(ty.element_type(), Type::Integer { width: 1, .. }) {
             return false;
@@ -227,7 +229,7 @@ impl MaskState {
     }
 
     /// 结构化的有效个数换成一维 i1 mask（满的不要）。
-    fn to_unstructured(o: Ofr, size: i64, c: &mut Cursor<'_, '_>) -> Option<ValueId> {
+    fn to_unstructured(o: Ofr, size: i64, c: &mut Rewriter<'_, '_>) -> Option<ValueId> {
         if o.int() == Some(size) {
             return None;
         }
@@ -290,7 +292,7 @@ impl MaskState {
         max_index <= range_max && max_index <= product_max / scale
     }
 
-    fn ceil_div(n: Ofr, d: i64, c: &mut Cursor<'_, '_>) -> Ofr {
+    fn ceil_div(n: Ofr, d: i64, c: &mut Rewriter<'_, '_>) -> Ofr {
         if let Some(v) = n.int() {
             return Ofr::idx(v.div_euclid(d) + i64::from(v.rem_euclid(d) != 0));
         }
@@ -299,7 +301,7 @@ impl MaskState {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn parse_cmp(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_cmp(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let rty = c.body.ty(c.body.res(op, 0)).clone();
         let mut cmp_dim: Option<usize>;
         let cmp_v = c.body.res(op, 0);
@@ -405,7 +407,7 @@ impl MaskState {
         true
     }
 
-    fn parse_iter_arg(&mut self, v: ValueId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_iter_arg(&mut self, v: ValueId, c: &mut Rewriter<'_, '_>) -> bool {
         let Def::Arg(blk, idx) = c.body[v].def else { return false };
         let Some(f) = c.body.block_owner(blk).filter(|f| c.body.is(*f, Kind::ScfFor)) else { return false };
         let mut p = c.body.parent_op(f);
@@ -424,9 +426,11 @@ impl MaskState {
         let tv = c.body.opd(gs, 0);
         let mut lhs = Self::default();
         {
-            let mut inner = Cursor::before(c.body, f);
-            inner.loc.clone_from(&c.loc);
-            if !lhs.parse(tv, &mut inner) {
+            let ip = c.ip;
+            c.set_before(f);
+            let ok = lhs.parse(tv, c);
+            c.ip = ip;
+            if !ok {
                 return false;
             }
         }
@@ -448,7 +452,7 @@ impl MaskState {
         true
     }
 
-    fn parse_range(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_range(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let b = &*c.body;
         let shape = b.ty(b.res(op, 0)).dims().unwrap_or_default();
         let (s, e) = (b.int_attr(op, "start").unwrap_or(0) as i64, b.int_attr(op, "end").unwrap_or(0) as i64);
@@ -462,7 +466,7 @@ impl MaskState {
         true
     }
 
-    fn parse_broadcast(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_broadcast(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let src = c.body.opd(op, 0);
         let ss = c.body.ty(src).dims().unwrap_or_default();
         let ds = c.body.ty(c.body.res(op, 0)).dims().unwrap_or_default();
@@ -477,7 +481,7 @@ impl MaskState {
         true
     }
 
-    fn parse_splat(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_splat(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let src = c.body.opd(op, 0);
         let ds = c.body.ty(c.body.res(op, 0)).dims().unwrap_or_default();
         if !matches!(c.body.ty(src), Type::Integer { .. }) || !self.parse(src, c) {
@@ -492,7 +496,7 @@ impl MaskState {
         true
     }
 
-    fn parse_expand(&mut self, op: mlirpass::OpId, c: &mut Cursor<'_, '_>) -> bool {
+    fn parse_expand(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let ds = c.body.ty(c.body.res(op, 0)).dims().unwrap_or_default();
         let axis = c.body.int_attr(op, "axis").unwrap_or(0) as usize;
         let src = c.body.opd(op, 0);

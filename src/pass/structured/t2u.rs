@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mlirformat::{Error, Type};
 use mlirpass::{Body, OpData, OpId, PassManager, Passes, ValueId, pass};
 
-use crate::ir::{Cursor, dense_i32, int, integer};
+use crate::ir::{dense_i32, int, integer, TtBuilder};
+use mlirpass::{Quiet, Rewriter};
 use crate::{Ir, Kind};
 
 /// 选项同 triton-shared 的 `Passes.td`。
@@ -68,8 +69,11 @@ impl Unstructured {
                     continue;
                 }
                 let loc = b[a].loc.clone();
-                let mut c = Cursor::start(b, entry, loc);
-                let zero = c.constant(integer(default_bits, 0), int(default_bits));
+                let mut q = Quiet;
+                let mut c = Rewriter::new(b, &mut q);
+                c.set_start(entry);
+                c.loc = loc;
+                let zero = c.scalar(integer(default_bits, 0), int(default_bits));
                 args.insert(a);
                 let t = b.ty(a).owned();
                 self.map.entry(a).or_insert((a, t, default_bits, zero));
@@ -83,8 +87,10 @@ impl Unstructured {
             }
         });
         for o in i2p {
-            let mut c = Cursor::before(b, o);
-            let zero = c.constant(integer(default_bits, 0), int(default_bits));
+            let mut q = Quiet;
+            let mut c = Rewriter::new(b, &mut q);
+            c.before_op(o);
+            let zero = c.scalar(integer(default_bits, 0), int(default_bits));
             let r = b.res(o, 0);
             let t = b.ty(r).owned();
             self.map.entry(r).or_insert((r, t, default_bits, zero));
@@ -102,7 +108,9 @@ impl Unstructured {
                             false
                         } else {
                             let (p, pt, _, off) = self.map[&b.opd(user, 0)].clone();
-                            let mut c = Cursor::before(b, user);
+                            let mut q = Quiet;
+                            let mut c = Rewriter::new(b, &mut q);
+                            c.before_op(user);
                             let m = c.value(Kind::TtAddptr, &[p, off], pt);
                             b.set_operand(user, 0, m);
                             true
@@ -113,7 +121,9 @@ impl Unstructured {
                         let mut off = b.opd(user, 1);
                         let rw = b.ty(off).element_type().int_width().map_or(32, |x| x.0);
                         let w = lw.max(rw);
-                        let mut c = Cursor::before(b, user);
+                        let mut q = Quiet;
+                        let mut c = Rewriter::new(b, &mut q);
+                        c.before_op(user);
                         let prev = if lw < w { c.value(Kind::ArithExtsi, &[prev], offset_type(&pt, w)) } else { prev };
                         if rw < w {
                             off = c.value(Kind::ArithExtsi, &[off], offset_type(&pt, w));
@@ -131,7 +141,9 @@ impl Unstructured {
                         let rt = b.ty(r).owned();
                         if ptr_like(&rt) {
                             let (p, _, w, off) = self.map[&b.opd(user, 0)].clone();
-                            let mut c = Cursor::before(b, user);
+                            let mut q = Quiet;
+                            let mut c = Rewriter::new(b, &mut q);
+                            c.before_op(user);
                             // C++ 用不带属性的通用 `create` 克隆
                             let o = c.create(OpData::named(k.name()).operands(&[off]), &[offset_type(&rt, w)]);
                             let nv = c.body.res(o, 0);
@@ -182,7 +194,9 @@ impl Unstructured {
                     let mask = (b[op].operands.len() >= 2).then(|| b.opd(op, 1));
                     let other = (b[op].operands.len() >= 3).then(|| b.opd(op, 2));
                     let rt = b.ty(b.res(op, 0)).clone();
-                    let mut c = Cursor::before(b, op);
+                    let mut q = Quiet;
+                    let mut c = Rewriter::new(b, &mut q);
+                    c.before_op(op);
                     let other = match other {
                         Some(o) => match crate::pass::ptr_analysis::PtrAnalysis::scalar_value_pub(o, &mut c) {
                             Some(s) => Some(s),
@@ -202,7 +216,9 @@ impl Unstructured {
                     let (p, _, _, off) = self.map[&b.opd(op, 0)].clone();
                     let val = b.opd(op, 1);
                     let mask = (b[op].operands.len() >= 3).then(|| b.opd(op, 2));
-                    let mut c = Cursor::before(b, op);
+                    let mut q = Quiet;
+                    let mut c = Rewriter::new(b, &mut q);
+                    c.before_op(op);
                     let mut operands = vec![p, off, val];
                     operands.extend(mask);
                     c.create(OpData::build(Kind::TtsScatter.name()).operands(&operands), &[]);
@@ -221,7 +237,9 @@ impl Unstructured {
                     };
                     let cur = b.opd(op, at);
                     let (bt, ct) = (b.ty(base_off).clone(), b.ty(cur).clone());
-                    let mut c = Cursor::before(b, op);
+                    let mut q = Quiet;
+                    let mut c = Rewriter::new(b, &mut q);
+                    c.before_op(op);
                     let mut bo = base_off;
                     if bt != ct {
                         if matches!(ct, Type::Index) {

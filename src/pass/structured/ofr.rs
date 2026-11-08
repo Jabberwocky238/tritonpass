@@ -280,6 +280,30 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> OfrBuilder for mlirpass::Rewriter<'
     }
 }
 
+/// calcc 的 dope-* pass 还拿 [`Cursor`] 调 `materialize_offsets` 这类泛型入口：转给它自己的方法，迁完一起删。
+macro_rules! cursor_ofr {
+    ($($f:ident($($a:ident: $t:ty),*) -> $r:ty;)*) => {
+        impl OfrBuilder for Cursor<'_, '_> {
+            $(fn $f(&mut self, $($a: $t),*) -> $r { Cursor::$f(self, $($a),*) })*
+        }
+    };
+}
+
+cursor_ofr! {
+    index(v: i64) -> ValueId;
+    ofr_value(o: Ofr) -> ValueId;
+    ofr_index(o: Ofr) -> ValueId;
+    ofr_pair(l: Ofr, r: Ofr) -> (ValueId, ValueId);
+    add_ofr(l: Ofr, r: Ofr) -> Ofr;
+    sub_ofr(l: Ofr, r: Ofr) -> Ofr;
+    mul_ofr(l: Ofr, r: Ofr) -> Ofr;
+    minmax_ofr(l: Ofr, r: Ofr, max: bool) -> Ofr;
+    select_ofr(c: Ofr, t: Ofr, f: Ofr) -> Ofr;
+    compare_ofr(l: Ofr, r: Ofr, pred: i128, t: Ofr, f: Ofr) -> Ofr;
+    index_type_cast(v: ValueId, target: &Type<'static>) -> ValueId;
+    expand_ofr_index(ofr: Ofr, target: Ofr) -> Ofr;
+}
+
 impl Cursor<'_, '_> {
     /// `arith.constant v : index`。
     pub fn index(&mut self, v: i64) -> ValueId {

@@ -160,7 +160,8 @@ pub enum At {
     After(OpId),
 }
 
-/// 建 op 的游标：插入点 + 新 op 的位置（`loc(...)` 原文）。
+/// 建 op 的游标：插入点 + 新 op 的位置（`loc(...)` 原文）。tritonpass 自己已改用 [`TtBuilder`]（mlirpass `Rewriter`），
+/// 留给 calcc 的 dope-* pass 迁完为止。
 pub struct Cursor<'b, 'a> {
     pub body: &'b mut Body<'a>,
     pub at: At,
@@ -258,6 +259,8 @@ impl<'b, 'a> Cursor<'b, 'a> {
 /// ⭐ 在 mlirpass 的 [`Rewriter`] 上建 tt / tts / arith / scf op 的小工具（`OpBuilder` 的那几个便捷构造）：插入点、位置、
 /// 监听都是 rewriter 的（新 op 没写位置的取 `rw.loc`，即被改写的 op 的位置）。`#[rewrite]` 模式里直接对 `rw` 调。
 pub trait TtBuilder<'a> {
+    /// 插入点设在 `op` 之前，新 op 的位置取 `op` 的（`OpBuilder(op)`）。
+    fn before_op(&mut self, op: OpId);
     /// 建一条单结果的 op，返回结果。
     fn value(&mut self, k: Kind, operands: &[ValueId], ty: Type<'a>) -> ValueId;
     /// 带属性的单结果 op。
@@ -281,6 +284,11 @@ pub trait TtBuilder<'a> {
 }
 
 impl<'a, L: mlirpass::Listener<'a> + ?Sized> TtBuilder<'a> for mlirpass::Rewriter<'_, 'a, L> {
+    fn before_op(&mut self, op: OpId) {
+        self.set_before(op);
+        self.loc = self.body[op].loc.clone();
+    }
+
     fn value(&mut self, k: Kind, operands: &[ValueId], ty: Type<'a>) -> ValueId {
         let o = self.create(OpData::build(k.name()).operands(operands), &[ty]);
         self.body.res(o, 0)

@@ -4,7 +4,9 @@ use mlirformat::Type;
 use mlirpass::{Body, OpData, ValueId};
 
 use crate::pass::ofr::Ofr;
-use crate::ir::{Cursor, dense_i32, dense_i64};
+use crate::ir::{dense_i32, dense_i64, TtBuilder};
+use crate::pass::ofr::OfrBuilder;
+use mlirpass::Rewriter;
 use crate::{Ir, Kind, pointee};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -100,7 +102,7 @@ impl PtrState {
 
     /// `addState`。
     #[allow(clippy::too_many_lines)]
-    pub fn add_state(&mut self, l: &Self, r: &Self, unstructured: bool, c: &mut Cursor<'_, '_>) -> bool {
+    pub fn add_state(&mut self, l: &Self, r: &Self, unstructured: bool, c: &mut Rewriter<'_, '_>) -> bool {
         if l.source.is_some() && r.source.is_some() {
             return false;
         }
@@ -189,7 +191,7 @@ impl PtrState {
     }
 
     /// `mulState`。
-    pub fn mul_state(&mut self, l: &Self, r: &Self, unstructured: bool, c: &mut Cursor<'_, '_>) -> bool {
+    pub fn mul_state(&mut self, l: &Self, r: &Self, unstructured: bool, c: &mut Rewriter<'_, '_>) -> bool {
         if l.source.is_some() && r.source.is_some() {
             return false;
         }
@@ -241,7 +243,7 @@ impl PtrState {
     }
 
     /// `tts.make_tptr`：次序空是张量指针，非空是块指针。
-    pub fn make_tptr(&self, c: &mut Cursor<'_, '_>) -> ValueId {
+    pub fn make_tptr(&self, c: &mut Rewriter<'_, '_>) -> ValueId {
         let src = self.source.expect("有基址");
         let sizes = self.static_sizes();
         let base_ty = c.body.ty(src).clone();
@@ -269,7 +271,7 @@ impl PtrState {
     }
 
     /// `tts.make_gather_scatter_tptr`（非结构化的那一维的偏移先压成一维）。
-    pub fn make_gather_scatter(&mut self, c: &mut Cursor<'_, '_>) -> ValueId {
+    pub fn make_gather_scatter(&mut self, c: &mut Rewriter<'_, '_>) -> ValueId {
         let sizes = self.static_sizes();
         let d = self.non_structured_dim(c.body);
         let mut off = self.offsets[d].value().expect("非结构化维的偏移是值");
@@ -287,7 +289,7 @@ impl PtrState {
     }
 
     /// `MakeGatherScatterTensorPtrOp::build`。
-    pub fn gather_scatter_op(c: &mut Cursor<'_, '_>, base: ValueId, off: ValueId, mask: Option<ValueId>, dim: usize, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr]) -> ValueId {
+    pub fn gather_scatter_op(c: &mut Rewriter<'_, '_>, base: ValueId, off: ValueId, mask: Option<ValueId>, dim: usize, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr]) -> ValueId {
         let (mut st_off, mut dyn_off) = (Vec::new(), Vec::new());
         for (i, o) in offsets.iter().enumerate() {
             if i == dim {

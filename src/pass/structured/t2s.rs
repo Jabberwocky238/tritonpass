@@ -10,7 +10,8 @@ use mlirformat::{Error, Type};
 use mlirpass::{Body, Def, OpData, OpId, ValueId, pass};
 
 use crate::pass::ptr_analysis::PtrAnalysis;
-use crate::ir::{At, Cursor, dense_i32};
+use crate::ir::{dense_i32, TtBuilder};
+use mlirpass::{Quiet, Rewriter};
 use crate::pass::uniform_lanes::Canon;
 use crate::{Ir, Kind, pointee};
 
@@ -116,14 +117,18 @@ impl Prepass {
         let mut tys = vec![t];
         tys.extend(core::iter::repeat_n(Type::Index, no + ns));
         let d = OpData::build(Kind::TtsGetStructuredState.name()).operands(&[v]).with("resultSegmentSizes", dense_i32(&[1, no as i64, ns as i64]));
-        let (at, loc) = match b[v].def {
-            Def::Result(o, _) => (At::After(o), b[o].loc.clone()),
-            Def::Arg(blk, _) => match b.first_op(blk) {
-                Some(first) => (At::Before(first), b[v].loc.clone()),
-                None => (At::End(blk), b[v].loc.clone()),
-            },
-        };
-        let mut c = Cursor { body: b, at, loc };
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        match c.body[v].def {
+            Def::Result(o, _) => {
+                c.set_after(o);
+                c.loc = c.body[o].loc.clone();
+            }
+            Def::Arg(blk, _) => {
+                c.set_start(blk);
+                c.loc = c.body[v].loc.clone();
+            }
+        }
         let o = c.create(d, &tys);
         let g = b[o].results.to_vec();
         self.groups.insert(v, g.clone());
@@ -146,7 +151,9 @@ impl Prepass {
             }
         }
         let (lb, ub, step) = (b.opd(f, 0), b.opd(f, 1), b.opd(f, 2));
-        let mut cur = Cursor::before(b, f);
+        let mut q = Quiet;
+        let mut cur = Rewriter::new(b, &mut q);
+        cur.before_op(f);
         let (nf, nblk) = cur.for_loop(lb, ub, step, &new_inits);
         // 搬循环体：旧块参数 ⇒ 新块参数（展开的取那组）
         let oblk = b.entry(f, 0);

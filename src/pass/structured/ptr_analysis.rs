@@ -9,7 +9,9 @@ use mlirpass::{Body, OpData, OpId, ValueId};
 use crate::pass::mask::MaskState;
 use crate::pass::ofr::Ofr;
 use crate::pass::ptr_state::PtrState;
-use crate::ir::{Cursor, dense_i32, dense_i64};
+use crate::ir::{dense_i32, dense_i64, TtBuilder};
+use crate::pass::ofr::OfrBuilder;
+use mlirpass::{Quiet, Rewriter};
 use crate::{Ir, Kind};
 
 pub struct PtrAnalysis {
@@ -76,7 +78,7 @@ impl PtrAnalysis {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn visit(&mut self, v: ValueId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    pub fn visit(&mut self, v: ValueId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         if !self.unstructured
             && let Some(k) = self.known.get(&v)
         {
@@ -86,12 +88,12 @@ impl PtrAnalysis {
         let ty = c.body.ty(v).clone();
         if matches!(ty, Type::Integer { .. }) {
             let def = c.body.def_op(v);
-            let saved = c.at;
+            let saved = c.ip;
             if let Some(d) = def {
-                c.at = crate::ir::At::After(d);
+                c.set_after(d);
             }
             let cast = c.value(Kind::ArithIndexCast, &[v], Type::Index);
-            c.at = saved;
+            c.ip = saved;
             s.scalar = Some(cast);
             return true;
         }
@@ -192,7 +194,7 @@ impl PtrAnalysis {
         }
     }
 
-    fn visit_add(&mut self, op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_add(&mut self, op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         let (lv, rv) = (c.body.opd(op, 0), c.body.opd(op, 1));
         let mut l = PtrState::default();
         if !self.visit(lv, &mut l, c) {
@@ -231,7 +233,7 @@ impl PtrAnalysis {
         true
     }
 
-    fn visit_mul(&mut self, op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_mul(&mut self, op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         let (lv, rv) = (c.body.opd(op, 0), c.body.opd(op, 1));
         let mut l = PtrState::default();
         if !self.visit(lv, &mut l, c) {
@@ -251,7 +253,7 @@ impl PtrAnalysis {
         ok
     }
 
-    fn visit_rem(&mut self, op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_rem(&mut self, op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         if !self.modulo {
             return false;
         }
@@ -293,7 +295,7 @@ impl PtrAnalysis {
         true
     }
 
-    fn visit_broadcast(&mut self, op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_broadcast(&mut self, op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         let src = c.body.opd(op, 0);
         if !matches!(c.body.ty(src), Type::Shaped(_)) {
             return false;
@@ -311,7 +313,7 @@ impl PtrAnalysis {
         true
     }
 
-    fn visit_splat(&mut self, op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_splat(&mut self, op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         let src = c.body.opd(op, 0);
         let ds = c.body.ty(c.body.res(op, 0)).dims().unwrap_or_default();
         if !self.visit(src, s, c) {
@@ -333,7 +335,7 @@ impl PtrAnalysis {
         !(s.has_modulo() && s.rank() > 2)
     }
 
-    fn visit_addptr(&mut self, op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_addptr(&mut self, op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         let (pv, ov) = (c.body.opd(op, 0), c.body.opd(op, 1));
         let loc = c.body[op].loc.clone();
         let saved = core::mem::replace(&mut c.loc, loc);
@@ -392,7 +394,9 @@ impl PtrAnalysis {
     }
 
     fn rewrite_addptr(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         let mut st = PtrState::default();
         if !self.visit_addptr(op, &mut st, &mut c) {
             return false;
@@ -424,7 +428,7 @@ impl PtrAnalysis {
     }
 
     /// `visitOperandMakeTensorPtr`：块指针的状态（各维尺寸取指向的张量形状，行距、偏移、shape 都 index_cast，偏移乘上行距）。
-    fn visit_make_tensor_ptr(op: OpId, s: &mut PtrState, c: &mut Cursor<'_, '_>) -> bool {
+    fn visit_make_tensor_ptr(op: OpId, s: &mut PtrState, c: &mut Rewriter<'_, '_>) -> bool {
         let order = crate::ir::dense_values(c.body[op].get("order"));
         if order.is_empty() {
             return false;
@@ -451,7 +455,9 @@ impl PtrAnalysis {
 
     /// `rewriteMakeTensorPtrOp`。
     fn rewrite_make_tensor_ptr(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         let mut st = PtrState::default();
         if !Self::visit_make_tensor_ptr(op, &mut st, &mut c) {
             return false;
@@ -465,7 +471,9 @@ impl PtrAnalysis {
 
     /// `rewriteAdvanceOp`：新偏移 = index_cast(增量) × 行距 + 原偏移（常量偏移先物化）。
     fn rewrite_advance(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         let mut st = PtrState::default();
         let ptr = c.body.opd(op, 0);
         if !self.visit(ptr, &mut st, &mut c) {
@@ -475,7 +483,7 @@ impl PtrAnalysis {
         let mut offsets = Vec::new();
         for ((inc, off), stride) in increments.iter().zip(st.offsets.clone()).zip(st.strides.clone()) {
             let ov = match off {
-                Ofr::I(v, _) => c.constant(crate::ir::integer(64, i128::from(v)), Type::Index),
+                Ofr::I(v, _) => c.scalar(crate::ir::integer(64, i128::from(v)), Type::Index),
                 Ofr::V(v) => v,
             };
             let cast = c.value(Kind::ArithIndexCast, &[*inc], Type::Index);
@@ -505,7 +513,9 @@ impl PtrAnalysis {
         } else if !is_ptr_like(&rty) {
             return;
         }
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         let mut st = PtrState::default();
         let ok = if splat { self.visit_splat(op, &mut st, &mut c) } else { self.visit_broadcast(op, &mut st, &mut c) };
         if !ok {
@@ -535,7 +545,10 @@ impl PtrAnalysis {
             if is_ptr_like(b.ty(arg)) && st.rank() != 0 {
                 let blk = b.entry(l, 0);
                 let loc = b[l].loc.clone();
-                let mut c = Cursor::start(b, blk, loc);
+                let mut q = Quiet;
+                let mut c = Rewriter::new(b, &mut q);
+                c.set_start(blk);
+                c.loc = loc;
                 let t = st.make_tptr(&mut c);
                 self.ptr_map.insert(arg, t);
             }
@@ -544,7 +557,7 @@ impl PtrAnalysis {
     }
 
     /// 整块 mask 是标量条件时折进第 0 维的有效个数（`foldScalarConditionIntoDims`）。
-    fn fold_scalar_condition(m: &MaskState, c: &mut Cursor<'_, '_>) -> Vec<Ofr> {
+    fn fold_scalar_condition(m: &MaskState, c: &mut Rewriter<'_, '_>) -> Vec<Ofr> {
         let mut dims = m.dims.clone();
         let Some(s) = m.scalar else { return dims };
         if dims.is_empty() {
@@ -567,7 +580,7 @@ impl PtrAnalysis {
 
     /// `applyUnstructuredMask`。
     #[allow(clippy::too_many_lines)]
-    fn apply_unstructured_mask(ptr: ValueId, m: &mut MaskState, c: &mut Cursor<'_, '_>) -> Option<ValueId> {
+    fn apply_unstructured_mask(ptr: ValueId, m: &mut MaskState, c: &mut Rewriter<'_, '_>) -> Option<ValueId> {
         let masks = m.unstructured();
         if masks.is_empty() {
             return Some(ptr);
@@ -596,7 +609,7 @@ impl PtrAnalysis {
                 let base = b.opd(def, 0);
                 let sizes = crate::ir::dense_values(b[def].get("sizes"));
                 let (strides, offsets, _) = Self::mixed_tptr(b, def);
-                let to_i32 = |o: Ofr, c: &mut Cursor<'_, '_>| {
+                let to_i32 = |o: Ofr, c: &mut Rewriter<'_, '_>| {
                     let mut v = c.ofr_value(o);
                     if matches!(c.body.ty(v), Type::Index) {
                         v = c.value(Kind::ArithIndexCast, &[v], crate::ir::int(32));
@@ -665,7 +678,9 @@ impl PtrAnalysis {
         }
         let mask = (b[op].operands.len() >= 2).then(|| b.opd(op, 1));
         let other = (b[op].operands.len() >= 3).then(|| b.opd(op, 2));
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         let mut dims = Vec::new();
         if let Some(m) = mask {
             let mut ms = MaskState::default();
@@ -704,7 +719,9 @@ impl PtrAnalysis {
         }
         let val = b.opd(op, 1);
         let mask = (b[op].operands.len() >= 3).then(|| b.opd(op, 2));
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         let mut dims = Vec::new();
         if let Some(m) = mask {
             let mut ms = MaskState::default();
@@ -724,12 +741,12 @@ impl PtrAnalysis {
     }
 
     /// [`Self::scalar_value`]（给 triton-to-unstructured 用）。
-    pub fn scalar_value_pub(v: ValueId, c: &mut Cursor<'_, '_>) -> Option<ValueId> {
+    pub fn scalar_value_pub(v: ValueId, c: &mut Rewriter<'_, '_>) -> Option<ValueId> {
         Self::scalar_value(v, c)
     }
 
     /// `utils::getScalarValue`：splat / sitofp / truncf 链上取出标量，在当前位置重建同样的链（常量就地物化）。
-    fn scalar_value(mut v: ValueId, c: &mut Cursor<'_, '_>) -> Option<ValueId> {
+    fn scalar_value(mut v: ValueId, c: &mut Rewriter<'_, '_>) -> Option<ValueId> {
         let mut chain: Vec<OpId> = Vec::new();
         loop {
             if !matches!(c.body.ty(v), Type::Shaped(_)) {
@@ -744,7 +761,7 @@ impl PtrAnalysis {
                     }
                     let saved = c.loc.clone();
                     c.loc.clone_from(&c.body[d].loc);
-                    let cv = c.constant(k.values[0], k.ty.element_type().clone());
+                    let cv = c.scalar(k.values[0], k.ty.element_type().clone());
                     c.loc = saved;
                     return Some(Self::rebuild_chain(cv, &chain, c));
                 }
@@ -758,7 +775,7 @@ impl PtrAnalysis {
         }
     }
 
-    fn rebuild_chain(mut src: ValueId, chain: &[OpId], c: &mut Cursor<'_, '_>) -> ValueId {
+    fn rebuild_chain(mut src: ValueId, chain: &[OpId], c: &mut Rewriter<'_, '_>) -> ValueId {
         for &op in chain.iter().rev() {
             let k = c.body.kind(op).expect("认得");
             let rt = c.body.ty(c.body.res(op, 0)).element_type().clone();
@@ -776,7 +793,9 @@ impl PtrAnalysis {
         };
         let remapped = self.ptr_map.get(&tv).copied().unwrap_or(tv);
         let mut reps = vec![remapped];
-        let mut c = Cursor::before(b, op);
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
         if st.rank() == 0 {
             match st.scalar {
                 Some(s) => reps.push(s),
@@ -843,7 +862,9 @@ impl PtrAnalysis {
             Some(Kind::TtsGetStructuredState) => {
                 let tv = b.opd(op, 0);
                 if !self.known.contains_key(&tv) {
-                    let mut c = Cursor::before(b, op);
+                    let mut q = Quiet;
+                    let mut c = Rewriter::new(b, &mut q);
+                    c.before_op(op);
                     let mut st = PtrState::default();
                     if self.visit(tv, &mut st, &mut c) && st.is_structured(c.body) {
                         self.known.insert(tv, st);

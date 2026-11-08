@@ -4,7 +4,8 @@ use mlirformat::Type;
 use mlirpass::{Body, Def, OpId, ValueId};
 
 use super::ofr::Ofr;
-use crate::ir::{Cursor, DYNAMIC, dense_values};
+use crate::ir::{DYNAMIC, dense_values};
+use crate::pass::ofr::OfrBuilder;
 use crate::{Ir, Kind};
 
 /// 无界维的大小（指针没有长度）。
@@ -232,7 +233,7 @@ impl Window {
     }
 
     /// 计划建成逐维下标偏移。
-    pub fn materialize_offsets(plan: &WindowPlan, c: &mut Cursor<'_, '_>) -> Vec<Ofr> {
+    pub fn materialize_offsets(plan: &WindowPlan, c: &mut impl OfrBuilder) -> Vec<Ofr> {
         let mut out = Vec::new();
         for d in 0..plan.idx_terms.len() {
             let mut sum = Ofr::idx(0);
