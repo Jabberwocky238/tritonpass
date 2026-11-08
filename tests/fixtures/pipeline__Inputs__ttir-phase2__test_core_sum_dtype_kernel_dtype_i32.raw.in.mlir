@@ -1,0 +1,48 @@
+#loc = loc("triton@v3.7.1/python/test/unit/language/test_core.py":2558:0)
+#loc5 = loc("triton@v3.7.1/python/triton/language/standard.py":287:0)
+#loc7 = loc(unknown)
+#loc10 = loc("triton@v3.7.1/python/triton/language/standard.py":262:0)
+#loc14 = loc("out_ptr"(#loc))
+#loc17 = loc("input"(#loc5))
+#loc18 = loc("a"(#loc10))
+#loc19 = loc("b"(#loc10))
+module {
+  tt.func public @kernel_dtype(%out_ptr: !tt.ptr<i32> loc("out_ptr"(#loc))) attributes {noinline = false} {
+    %x = arith.constant 1 : i32 loc(#loc15)
+    %x_0 = arith.constant dense<1> : tensor<32x32xi32> loc(#loc15)
+    %x_1 = tt.call @triton.language.standard.sum__i32S32_32S_cNone_cFalse_cNone(%x_0) : (tensor<32x32xi32>) -> i32 loc(#loc16)
+    tt.store %out_ptr, %x_1 : !tt.ptr<i32> loc(#loc3)
+    tt.return loc(#loc4)
+  } loc(#loc)
+  tt.func private @triton.language.standard.sum__i32S32_32S_cNone_cFalse_cNone(%input: tensor<32x32xi32> loc("input"(#loc5))) -> i32 attributes {noinline = false} {
+    %0 = tt.reshape %input allow_reorder : tensor<32x32xi32> -> tensor<1024xi32> loc(#loc6)
+    %1 = "tt.reduce"(%0) <{axis = 0 : i32}> ({
+    ^bb0(%arg1: i32 loc(unknown), %arg2: i32 loc(unknown)):
+      %3 = tt.call @triton.language.standard._sum_combine__i32_i32(%arg1, %arg2) : (i32, i32) -> i32 loc(#loc6)
+      tt.reduce.return %3 : i32 loc(#loc6)
+    }) : (tensor<1024xi32>) -> i32 loc(#loc6)
+    tt.return %1 : i32 loc(#loc8)
+  ^bb1:  // no predecessors
+    %2 = ub.poison : i32 loc(#loc9)
+    tt.return %2 : i32 loc(#loc9)
+  } loc(#loc5)
+  tt.func private @triton.language.standard._sum_combine__i32_i32(%a: i32 loc("a"(#loc10)), %b: i32 loc("b"(#loc10))) -> i32 attributes {noinline = false} {
+    %0 = arith.addi %a, %b : i32 loc(#loc11)
+    tt.return %0 : i32 loc(#loc12)
+  ^bb1:  // no predecessors
+    %1 = ub.poison : i32 loc(#loc13)
+    tt.return %1 : i32 loc(#loc13)
+  } loc(#loc10)
+} loc(#loc)
+#loc1 = loc("triton@v3.7.1/python/test/unit/language/test_core.py":2559:26)
+#loc2 = loc("triton@v3.7.1/python/test/unit/language/test_core.py":2560:15)
+#loc3 = loc("triton@v3.7.1/python/test/unit/language/test_core.py":2561:22)
+#loc4 = loc("triton@v3.7.1/python/test/unit/language/test_core.py":2561:4)
+#loc6 = loc("triton@v3.7.1/python/triton/language/standard.py":293:36)
+#loc8 = loc("triton@v3.7.1/python/triton/language/standard.py":293:11)
+#loc9 = loc("triton@v3.7.1/python/triton/language/standard.py":293:4)
+#loc11 = loc("triton@v3.7.1/python/triton/language/standard.py":263:15)
+#loc12 = loc("triton@v3.7.1/python/triton/language/standard.py":263:11)
+#loc13 = loc("triton@v3.7.1/python/triton/language/standard.py":263:4)
+#loc15 = loc("x"(#loc1))
+#loc16 = loc("x"(#loc2))

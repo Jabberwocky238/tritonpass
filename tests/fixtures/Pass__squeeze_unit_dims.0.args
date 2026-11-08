@@ -1,0 +1,2 @@
+--split-input-file
+--triton-squeeze-unit-dims

@@ -1,0 +1,1 @@
+--triton-arith-to-linalg=tensor-ptr-to-linalg=true

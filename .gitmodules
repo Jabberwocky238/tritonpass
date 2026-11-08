@@ -1,0 +1,8 @@
+[submodule "third_party/triton"]
+	path = third_party/triton
+	url = https://github.com/triton-lang/triton.git
+	shallow = true
+[submodule "third_party/triton-shared"]
+	path = third_party/triton-shared
+	url = https://github.com/facebookincubator/triton-shared.git
+	shallow = true

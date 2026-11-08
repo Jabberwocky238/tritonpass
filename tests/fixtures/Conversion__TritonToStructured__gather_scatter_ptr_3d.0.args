@@ -1,0 +1,4 @@
+--triton-to-structured
+--remove-dead-values
+--canonicalize
+--cse

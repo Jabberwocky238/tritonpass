@@ -1,0 +1,3 @@
+--triton-to-structured=enable-make-gather-scatter=false
+--cse
+--canonicalize

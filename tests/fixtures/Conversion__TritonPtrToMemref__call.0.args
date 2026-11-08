@@ -1,0 +1,2 @@
+--triton-arith-to-linalg=grid-encoding=args
+--triton-ptr-to-memref

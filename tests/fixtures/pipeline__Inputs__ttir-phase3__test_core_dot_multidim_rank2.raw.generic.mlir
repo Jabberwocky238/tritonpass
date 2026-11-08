@@ -1,0 +1,43 @@
+#map = affine_map<(d0, d1, d2) -> (d0, d2)>
+#map1 = affine_map<(d0, d1, d2) -> (d2, d1)>
+#map2 = affine_map<(d0, d1, d2) -> (d0, d1)>
+"builtin.module"() ({
+  "func.func"() <{function_type = (memref<?xbf16>, memref<?xbf16>, memref<?xf32>) -> (), sym_name = "kernel"}> ({
+  ^bb0(%arg0: memref<?xbf16>, %arg1: memref<?xbf16>, %arg2: memref<?xf32>):
+    %0 = "arith.constant"() <{value = 0.000000e+00 : f32}> : () -> f32
+    %1 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<1024xbf16>
+    %2 = "memref.subview"(%arg0) <{operandSegmentSizes = array<i32: 1, 0, 0, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: 1024>, static_strides = array<i64: 1>}> : (memref<?xbf16>) -> memref<1024xbf16, strided<[1]>>
+    "linalg.copy"(%2, %1) <{operandSegmentSizes = array<i32: 1, 1>}> ({
+    ^bb0(%arg10: bf16, %arg11: bf16):
+      "linalg.yield"(%arg10) : (bf16) -> ()
+    }) : (memref<1024xbf16, strided<[1]>>, memref<1024xbf16>) -> ()
+    %3 = "bufferization.to_tensor"(%1) <{restrict, writable}> : (memref<1024xbf16>) -> tensor<1024xbf16>
+    %4 = "tensor.expand_shape"(%3) <{reassociation = [[0, 1]], static_output_shape = array<i64: 32, 32>}> : (tensor<1024xbf16>) -> tensor<32x32xbf16>
+    %5 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<1024xbf16>
+    %6 = "memref.subview"(%arg1) <{operandSegmentSizes = array<i32: 1, 0, 0, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: 1024>, static_strides = array<i64: 1>}> : (memref<?xbf16>) -> memref<1024xbf16, strided<[1]>>
+    "linalg.copy"(%6, %5) <{operandSegmentSizes = array<i32: 1, 1>}> ({
+    ^bb0(%arg8: bf16, %arg9: bf16):
+      "linalg.yield"(%arg8) : (bf16) -> ()
+    }) : (memref<1024xbf16, strided<[1]>>, memref<1024xbf16>) -> ()
+    %7 = "bufferization.to_tensor"(%5) <{restrict, writable}> : (memref<1024xbf16>) -> tensor<1024xbf16>
+    %8 = "tensor.expand_shape"(%7) <{reassociation = [[0, 1]], static_output_shape = array<i64: 32, 32>}> : (tensor<1024xbf16>) -> tensor<32x32xbf16>
+    %9 = "tensor.empty"() : () -> tensor<32x32xf32>
+    %10 = "linalg.fill"(%0, %9) <{operandSegmentSizes = array<i32: 1, 1>}> ({
+    ^bb0(%arg6: f32, %arg7: f32):
+      "linalg.yield"(%arg6) : (f32) -> ()
+    }) : (f32, tensor<32x32xf32>) -> tensor<32x32xf32>
+    %11 = "linalg.matmul"(%4, %8, %10) <{indexing_maps = [#map, #map1, #map2], operandSegmentSizes = array<i32: 2, 1>}> ({
+    ^bb0(%arg3: bf16, %arg4: bf16, %arg5: f32):
+      %14 = "arith.extf"(%arg3) : (bf16) -> f32
+      %15 = "arith.extf"(%arg4) : (bf16) -> f32
+      %16 = "arith.mulf"(%14, %15) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+      %17 = "arith.addf"(%arg5, %16) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+      "linalg.yield"(%17) : (f32) -> ()
+    }) : (tensor<32x32xbf16>, tensor<32x32xbf16>, tensor<32x32xf32>) -> tensor<32x32xf32>
+    %12 = "tensor.collapse_shape"(%11) <{reassociation = [[0, 1]]}> : (tensor<32x32xf32>) -> tensor<1024xf32>
+    %13 = "memref.subview"(%arg2) <{operandSegmentSizes = array<i32: 1, 0, 0, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: 1024>, static_strides = array<i64: 1>}> : (memref<?xf32>) -> memref<1024xf32, strided<[1]>>
+    "bufferization.materialize_in_destination"(%12, %13) <{writable}> : (tensor<1024xf32>, memref<1024xf32, strided<[1]>>) -> ()
+    "func.return"() : () -> ()
+  }) : () -> ()
+}) : () -> ()
+

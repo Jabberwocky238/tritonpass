@@ -1,0 +1,61 @@
+// 手写的 TTIR（按 Triton 3.7.1 打印的写法，没有经 Triton 生成）：读指针 x 的偏移 %off 里有乘进偏移的运行期整数实参，
+// 写指针 o 的偏移是普通的 pid·32（写指针的偏移带 select、shli 这类运算会先 E-EXTENT）。偏移是 (…((pid·a + c)·b + c)·b …)，嵌套 20 层，在收集的深度上限之内：a、b 都要列。
+module {
+  tt.func public @k(%x: !tt.ptr<f32> loc("x"), %o: !tt.ptr<f32> loc("o"), %a: i32 loc("a"), %b: i32 loc("b"), %c: i32 loc("c"), %n: i32 loc("n")) attributes {noinline = false} {
+    %pid = tt.get_program_id x : i32
+    %e0 = arith.muli %pid, %a : i32
+    %s0 = arith.addi %e0, %c : i32
+    %m0 = arith.muli %s0, %b : i32
+    %s1 = arith.addi %m0, %c : i32
+    %m1 = arith.muli %s1, %b : i32
+    %s2 = arith.addi %m1, %c : i32
+    %m2 = arith.muli %s2, %b : i32
+    %s3 = arith.addi %m2, %c : i32
+    %m3 = arith.muli %s3, %b : i32
+    %s4 = arith.addi %m3, %c : i32
+    %m4 = arith.muli %s4, %b : i32
+    %s5 = arith.addi %m4, %c : i32
+    %m5 = arith.muli %s5, %b : i32
+    %s6 = arith.addi %m5, %c : i32
+    %m6 = arith.muli %s6, %b : i32
+    %s7 = arith.addi %m6, %c : i32
+    %m7 = arith.muli %s7, %b : i32
+    %s8 = arith.addi %m7, %c : i32
+    %m8 = arith.muli %s8, %b : i32
+    %s9 = arith.addi %m8, %c : i32
+    %m9 = arith.muli %s9, %b : i32
+    %s10 = arith.addi %m9, %c : i32
+    %m10 = arith.muli %s10, %b : i32
+    %s11 = arith.addi %m10, %c : i32
+    %m11 = arith.muli %s11, %b : i32
+    %s12 = arith.addi %m11, %c : i32
+    %m12 = arith.muli %s12, %b : i32
+    %s13 = arith.addi %m12, %c : i32
+    %m13 = arith.muli %s13, %b : i32
+    %s14 = arith.addi %m13, %c : i32
+    %m14 = arith.muli %s14, %b : i32
+    %s15 = arith.addi %m14, %c : i32
+    %m15 = arith.muli %s15, %b : i32
+    %s16 = arith.addi %m15, %c : i32
+    %m16 = arith.muli %s16, %b : i32
+    %s17 = arith.addi %m16, %c : i32
+    %m17 = arith.muli %s17, %b : i32
+    %s18 = arith.addi %m17, %c : i32
+    %m18 = arith.muli %s18, %b : i32
+    %s19 = arith.addi %m18, %c : i32
+    %m19 = arith.muli %s19, %b : i32
+    %off = arith.addi %m19, %c : i32
+    %c32 = arith.constant 32 : i32
+    %obase = arith.muli %pid, %c32 : i32
+    %xp = tt.addptr %x, %off : !tt.ptr<f32>, i32
+    %op = tt.addptr %o, %obase : !tt.ptr<f32>, i32
+    %r = tt.make_range {end = 32 : i32, start = 0 : i32} : tensor<32xi32>
+    %xs = tt.splat %xp : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+    %xv = tt.addptr %xs, %r : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+    %os = tt.splat %op : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+    %ov = tt.addptr %os, %r : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+    %v = tt.load %xv : tensor<32x!tt.ptr<f32>>
+    tt.store %ov, %v : tensor<32x!tt.ptr<f32>>
+    tt.return
+  }
+}

@@ -1,0 +1,2 @@
+--triton-to-structured=enable-modulo-support=true
+--canonicalize

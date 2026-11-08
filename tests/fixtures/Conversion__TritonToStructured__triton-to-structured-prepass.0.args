@@ -1,0 +1,2 @@
+--triton-to-structured=run-prepass-only=true
+--split-input-file
