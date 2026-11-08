@@ -146,7 +146,7 @@ impl L {
 /// tt 张量 op 的转换模式。
 struct Tt;
 
-#[patterns(gpu: bool, args: bool, addptr: bool, tensor_ptr: bool)]
+#[patterns(gpu: bool, args: bool, addptr: bool, tensor_ptr: bool, assert_cf: bool)]
 impl Tt {
     /// `StorePtrToLinalgConverter`（tensor-ptr-to-linalg）：指针张量上的 tt.store ⇒ 包着标量 tt.store 的 linalg.generic，没有 out。
     #[convert("tt.store", when = tensor_ptr)]
@@ -456,6 +456,96 @@ impl Tt {
             }
         };
         cr.replace_values(op, &[v]);
+        true
+    }
+
+    /// `AssertConverter`（assert-to-cf）：标量条件 ⇒ cf.assert；张量条件 ⇒ 逐元素 cf.assert 的 linalg.generic（没有 out）。
+    #[convert("tt.assert", when = assert_cf)]
+    fn assert(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        let b = &*cr.rw.body;
+        let cond = b.opd(op, 0);
+        let message = b[op].get("message").and_then(|m| m.text().ok()).unwrap_or_default();
+        let msg = Attribute::str(&format!("Assertion `{message}` failed"));
+        match b.ty(cond).clone() {
+            Type::Integer { .. } => {
+                cr.rw.create(OpData::build(Kind::CfAssert.name()).operands(&[cond]).with("msg", msg), &[]);
+            }
+            t @ Type::Shaped(_) => {
+                let rank = L::dims(&t).len() as u32;
+                cr.generic(&[], &[cond], &[], &[AffineMap::identity(rank)], &vec![true; rank as usize], &mut |cr, a| {
+                    cr.rw.create(OpData::build(Kind::CfAssert.name()).operands(&[a[0]]).with("msg", msg.clone()), &[]);
+                    Vec::new()
+                });
+            }
+            _ => {
+                cr.rw.body.emit_error(op, "Unexpected type in triton::AssertOp");
+                return false;
+            }
+        }
+        cr.rw.erase_op(op);
+        true
+    }
+
+    /// `CatConverter`：tt.cat ⇒ `tensor.concat dim(0)`（之后由 concat 分解改写成 insert_slice）。
+    #[convert("tt.cat")]
+    fn cat(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        let rt = L::rty(cr, op);
+        let operands: Vec<ValueId> = o.iter().flatten().copied().collect();
+        let c = cr.rw.create(OpData::build(Kind::TensorConcat.name()).operands(&operands).with("dim", Attribute::Int { lit: "0".into(), ty: Some(Type::int(64)) }), &[rt]);
+        let v = cr.rw.body[c].results[0];
+        cr.replace_values(op, &[v]);
+        true
+    }
+
+    /// `SplitConverter`：沿最后一维（长 2）切成两片（rank-reduced extract_slice）。
+    #[convert("tt.split")]
+    fn split(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        let b = &*cr.rw.body;
+        let input = b.opd(op, 0);
+        let shape = L::dims(b.ty(input));
+        let rt = L::rty(cr, op);
+        let mut results = Vec::new();
+        for i in 0..2 {
+            let mut offsets: Vec<mlirpass::MemrefOfr> = vec![mlirpass::MemrefOfr::C(0); shape.len()];
+            let mut sizes: Vec<mlirpass::MemrefOfr> = shape.iter().map(|d| mlirpass::MemrefOfr::C(*d)).collect();
+            let strides = vec![mlirpass::MemrefOfr::C(1); shape.len()];
+            *offsets.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(i);
+            *sizes.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(1);
+            let e = cr.rw.create(OpData::sliced(Kind::TensorExtractSlice.name(), &[input], &[offsets, sizes, strides]), core::slice::from_ref(&rt));
+            results.push(cr.rw.body[e].results[0]);
+        }
+        cr.replace_values(op, &results);
+        true
+    }
+
+    /// `JoinConverter`：一块 tensor.empty，两次 insert_slice 沿新的最后一维（长 2）拼起来。
+    #[convert("tt.join")]
+    fn join(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
+        let inputs = cr.rw.body[op].operands.to_vec();
+        let rt = L::rty(cr, op);
+        let shape = L::dims(&rt);
+        let mut result = cr.empty(&shape, rt.element_type().clone(), &[]);
+        for (i, input) in inputs.iter().take(2).enumerate() {
+            let mut offsets: Vec<mlirpass::MemrefOfr> = vec![mlirpass::MemrefOfr::C(0); shape.len()];
+            let mut sizes: Vec<mlirpass::MemrefOfr> = shape.iter().map(|d| mlirpass::MemrefOfr::C(*d)).collect();
+            let strides = vec![mlirpass::MemrefOfr::C(1); shape.len()];
+            *offsets.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(i as i64);
+            *sizes.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(1);
+            let s = cr.rw.create(OpData::sliced(Kind::TensorInsertSlice.name(), &[*input, result], &[offsets, sizes, strides]), core::slice::from_ref(&rt));
+            result = cr.rw.body[s].results[0];
+        }
+        cr.replace_values(op, &[result]);
+        true
+    }
+
+    /// `MulHiUIOpConverter`：arith.mului_extended 的高半。
+    #[convert("tt.mulhiui")]
+    fn mulhiui(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        let rt = L::rty(cr, op);
+        let operands: Vec<ValueId> = o.iter().flatten().copied().collect();
+        let m = cr.rw.create(OpData::build(Kind::ArithMuluiExtended.name()).operands(&operands), &[rt.clone(), rt]);
+        let high = cr.rw.body[m].results[1];
+        cr.replace_values(op, &[high]);
         true
     }
 
@@ -935,7 +1025,7 @@ impl Run for TritonArithToLinalg {
         body.apply_greedily(region, &minmax, &GreedyConfig::default());
         let target = self.target();
         let mut patterns = ConversionPatterns::default();
-        Tt::populate(&mut patterns, self.pids_to_gpu, self.pids_to_func_args, self.addptr_to_linalg, self.tensor_ptr_to_linalg);
+        Tt::populate(&mut patterns, self.pids_to_gpu, self.pids_to_func_args, self.addptr_to_linalg, self.tensor_ptr_to_linalg, self.assert_to_cf);
         if self.pids_to_func_args {
             let top = body.top_block(op);
             let funcs: Vec<OpId> = body.block_ops(top).into_iter().filter(|f| body.is(*f, Kind::TtFunc)).collect();
