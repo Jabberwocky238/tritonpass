@@ -57,9 +57,9 @@ dependencies = [
 
 [[package]]
 name = "mlirpass"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2d3585fe8a44d68756b1c9c1a5c0527c851c4b47298fbc153601e2b6065e99c"
+checksum = "ba9a3cb0c46ec377edc354d4e5927cc9d5f38f538dc5d4fd30be7ed5893da874"
 dependencies = [
  "libm",
  "mlirformat",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "tritonpass"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "mlirformat",
  "mlirpass",

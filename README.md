@@ -54,7 +54,7 @@ generic printing byte for byte with the C++ implementation these passes were por
 `scripts/fixtures.py`). Two groups: the per-pass lit cases, and 360 TTIR kernels (vLLM, FlagGems, Triton's own tests)
 through the whole pipeline.
 
-Now (mlirformat 0.6.5 / mlirpass 0.8.10): all 699 chunks match exactly. The reference dope-opt (bca398e) is built on
+Now (mlirformat 0.6.5 / mlirpass 0.8.11): all 699 chunks match exactly. The reference dope-opt (bca398e) is built on
 Triton's LLVM pin 1f126a6d, newer than the 22.1.8 mlirpass follows; the one difference that shows, `scf.for`'s successors
 by static trip count (remove-dead-values keeps fewer loop inits), comes from mlirpass's `scf-for-trip-count` feature,
 which tritonpass turns on.
