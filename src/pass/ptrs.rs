@@ -31,7 +31,7 @@ impl LowerBoolPtrRules {
             }
         }
         if changed {
-            rw.modify(f, |b| b[f].set("function_type", Attribute::Type(Type::Function(FunctionType { inputs, results: ft.results.clone() }))));
+            rw.modify(f, |b| b[f].set("function_type", Attribute::Type(Type::Function(Box::new(FunctionType { inputs, results: ft.results.clone() })))));
         }
         for o in rw.body.ops_in(f) {
             for r in rw.body[o].results.clone() {
@@ -74,7 +74,7 @@ impl BoolPtr {
         // `!tt.ptr<i1>` / `!tt.ptr<i1, 地址空间>`：换掉第一个参数
         let body = x.body.as_deref().unwrap_or("<i1>");
         let new_body = body.replacen("i1", "i8", 1);
-        let ptr = Type::Extended(mlirformat::Extended { name: x.name.clone(), body: Some(new_body.into()), params: Vec::new() });
+        let ptr = Type::Extended(Box::new(mlirformat::Extended { name: x.name.clone(), body: Some(new_body.into()), params: Vec::new() }));
         Some(match t {
             Type::Shaped(_) => t.with_element(ptr),
             _ => ptr,

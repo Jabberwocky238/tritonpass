@@ -780,6 +780,7 @@ impl Tt {
                 c.values.first().is_some_and(|x| match x {
                     Scalar::Int(i) => i.signed() == 0,
                     Scalar::Float(f) => f.to_f64() == 0.0,
+                    _ => false,
                 })
             })
         };
@@ -1026,7 +1027,7 @@ impl TritonArithToLinalg {
         let first = ft.inputs.len();
         let mut inputs = ft.inputs.clone();
         inputs.extend(std::iter::repeat_n(Type::int(32), NAMES.len()));
-        b[f].set("function_type", Attribute::Type(Type::Function(FunctionType { inputs, results: ft.results.clone() })));
+        b[f].set("function_type", Attribute::Type(Type::Function(Box::new(FunctionType { inputs, results: ft.results.clone() }))));
         let mut attrs = match b[f].get("arg_attrs") {
             Some(Attribute::Array(xs)) => Some(xs.clone()),
             _ => None,

@@ -267,7 +267,7 @@ impl PtrState {
             Some(s) => format!("<{inner}, {s}>"),
             None => format!("<{inner}>"),
         };
-        Type::Extended(mlirformat::Extended { name: "tt.ptr".into(), body: Some(body.into()), params: Vec::new() })
+        Type::Extended(Box::new(mlirformat::Extended { name: "tt.ptr".into(), body: Some(body.into()), params: Vec::new() }))
     }
 
     /// `tts.make_gather_scatter_tptr`（非结构化的那一维的偏移先压成一维）。

@@ -113,7 +113,7 @@ impl Parse for AssumeOp<'_> {
         let attrs = p.opt_dict()?;
         p.expect(":")?;
         let cond_ty = p.ty()?;
-        let sizes = Attribute::DenseArray { ty: Type::Integer { signedness: mlirformat::Signedness::Signless, width: 32 }, values: Vec::new() };
+        let sizes = Attribute::DenseArray { ty: Type::Integer { signedness: mlirformat::Signedness::Signless, width: 32 }, values: Vec::new().into() };
         let op = AssumeOp { cond, op_bundle_operands: Vec::new(), op_bundle_sizes: sizes, op_bundle_tags: None, cond_ty, op_bundle_operands_ty: Vec::new(), attrs, loc: p.opt_loc()? };
         Self::owned(op, p)
     }

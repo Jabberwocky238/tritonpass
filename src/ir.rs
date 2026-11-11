@@ -109,7 +109,7 @@ impl<'a> Ir<'a> for Body<'a> {
         }
         match first {
             Scalar::Int(i) => Some(i.signed()),
-            Scalar::Float(_) => None,
+            _ => None,
         }
     }
 

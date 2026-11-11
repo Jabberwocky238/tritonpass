@@ -56,7 +56,7 @@ impl Mem {
     /// `MemRefType::get(shape, elem, layout)`。
     pub(crate) fn memref<'a>(dims: &[i64], elem: Type<'a>, layout: Option<StridedLayout>) -> Type<'a> {
         let shape = dims.iter().map(|d| if *d == Dim::DYNAMIC { Dim::Dynamic } else { Dim::Static(*d) }).collect();
-        Type::Shaped(Shaped { kind: ShapedKind::MemRef, shape: Some(shape), elem: elem.into(), extras: layout.into_iter().map(Attribute::from).collect() })
+        Type::Shaped(Box::new(Shaped { kind: ShapedKind::MemRef, shape: Some(shape), elem: elem.into(), extras: layout.into_iter().map(Attribute::from).collect() }))
     }
 
     fn scalar_gather(b: &Body<'_>, op: OpId) -> bool {
@@ -116,6 +116,7 @@ impl Mem {
         c.values.first().is_some_and(|x| c.values.iter().all(|y| y == x) && match x {
             mlirformat::Scalar::Int(i) => i.signed() == 0,
             mlirformat::Scalar::Float(f) => f.to_f64() == 0.0 && !f.to_f64().is_sign_negative(),
+            _ => false,
         })
     }
 

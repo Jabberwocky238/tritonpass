@@ -22,7 +22,7 @@ impl OpInterfaces for TtInterfaces {
         if !b.is(op, Kind::TtLoad) {
             return None;
         }
-        let mut e = vec![EffectInstance { kind: EffectKind::Read, value: Some(b.opd(op, 0)), resource: "GlobalMemory" }];
+        let mut e = vec![EffectInstance { kind: EffectKind::Read, value: Some(b.opd(op, 0)), resource: "GlobalMemory".into() }];
         if matches!(b[op].get("isVolatile"), Some(Attribute::Bool(true))) {
             e.push(EffectInstance::on(EffectKind::Write, None));
         }
@@ -125,7 +125,7 @@ fn const_mask(b: &Body<'_>, v: ValueId) -> Option<bool> {
     let c = TtCanon::splat_const(b, v)?;
     match c.values.first()? {
         Scalar::Int(i) => Some(!i.is_zero()),
-        Scalar::Float(_) => None,
+        _ => None,
     }
 }
 

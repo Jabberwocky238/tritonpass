@@ -78,7 +78,7 @@ impl Prepass {
         let (no, ns) = Self::segments(t)?;
         let mut ts = vec![t.clone()];
         ts.extend(core::iter::repeat_n(Type::Index, no + ns));
-        Some(Type::Tuple(ts))
+        Some(Type::Tuple(ts.into()))
     }
 
     /// 一个类型转换器下的 scf 结构转换（`populateSCFStructuralTypeConversionsAndLegality` + `applyPartialConversion`）。
@@ -113,7 +113,7 @@ impl Prepass {
         let mut tc = TypeConverter::default();
         tc.conversion(|t| Some(Some(vec![t.clone()])));
         tc.conversion(|t| match t {
-            Type::Tuple(ts) => Some(Some(ts.clone())),
+            Type::Tuple(ts) => Some(Some(ts.to_vec())),
             _ => None,
         });
         tc.source(|rw, ty, inputs| Self::cast(rw, core::slice::from_ref(ty), &inputs[..1]).first().copied());

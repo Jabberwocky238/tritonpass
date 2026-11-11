@@ -120,7 +120,7 @@ impl Folder<'_, '_, '_> {
         let k = b.constant(v)?;
         k.values.iter().map(|s| match s {
             mlirformat::Scalar::Int(i) => i64::try_from(i.signed()).ok(),
-            mlirformat::Scalar::Float(_) => None,
+            _ => None,
         }).collect()
     }
 

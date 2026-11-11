@@ -50,7 +50,7 @@ fn top_level_first(text: &str) -> &str {
 
 /// `DefaultValuedAttr<DenseI32ArrayAttr, {}>`：空的 `array<i32>`。
 fn empty_i32_array() -> Attribute<'static> {
-    Attribute::DenseArray { ty: Type::Integer { signedness: mlirformat::Signedness::Signless, width: 32 }, values: Vec::new() }
+    Attribute::DenseArray { ty: Type::Integer { signedness: mlirformat::Signedness::Signless, width: 32 }, values: Vec::new().into() }
 }
 
 /// 自定义形式里印不印这个缺省值属性：等于缺省值的不印（`printOptionalAttrDict` 跳过取缺省值的 property）。
@@ -247,7 +247,7 @@ impl Parse for FuncOp<'_> {
         let (results, res_dicts): (Vec<_>, Vec<_>) = results.into_iter().unzip();
         let op = FuncOp {
             sym_name,
-            function_type: Type::Function(FunctionType { inputs, results }),
+            function_type: Type::Function(Box::new(FunctionType { inputs, results })),
             sym_visibility,
             arg_attrs: FuncOp::dicts(arg_dicts),
             res_attrs: FuncOp::dicts(res_dicts),

@@ -49,7 +49,7 @@ impl Sig {
 
     fn function_type<'a>(b: &mlirpass::Body<'a>, f: OpId) -> Option<FunctionType<'a>> {
         match b[f].get("function_type") {
-            Some(Attribute::Type(Type::Function(ft))) => Some(ft.clone()),
+            Some(Attribute::Type(Type::Function(ft))) => Some(*ft.clone()),
             _ => None,
         }
     }
@@ -74,7 +74,7 @@ impl Sig {
             return false;
         }
         let nt = FunctionType { inputs: sig.converted_types().to_vec(), results, ..ft };
-        cr.modify(op, |b| b[op].set("function_type", Attribute::Type(Type::Function(nt))));
+        cr.modify(op, |b| b[op].set("function_type", Attribute::Type(Type::Function(Box::new(nt)))));
         true
     }
 

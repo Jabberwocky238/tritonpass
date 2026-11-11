@@ -54,10 +54,18 @@ generic printing byte for byte with the C++ implementation these passes were por
 `scripts/fixtures.py`). Two groups: the per-pass lit cases, and 360 TTIR kernels (vLLM, FlagGems, Triton's own tests)
 through the whole pipeline.
 
-Now (mlirformat 0.6.5 / mlirpass 0.8.11): all 699 chunks match exactly. The reference dope-opt (bca398e) is built on
-Triton's LLVM pin 1f126a6d, newer than the 22.1.8 mlirpass follows; the one difference that shows, `scf.for`'s successors
-by static trip count (remove-dead-values keeps fewer loop inits), comes from mlirpass's `scf-for-trip-count` feature,
-which tritonpass turns on.
+Now (mlirformat 0.8.0 / mlirpass 0.10.1, which follow MLIR 23.1.5): 630 of the 699 chunks match exactly. The reference
+dope-opt (bca398e) is built on Triton's LLVM pin 1f126a6d, older than 23.1.5; the other 69 differ only by what MLIR
+changed since, all upstream canonicalization and ODS:
+
+| chunks | MLIR 23.1.5 | the reference (1f126a6d) |
+|---|---|---|
+| 58 | `index_cast(index_cast(x : A) : B) : A` folds to `x` only when `B` is at least as wide as `A` | also folds `index` ⇒ `i32` ⇒ `index`, which truncates |
+| 9 (and 25 of the 58) | `memref.load` has an `invariant` property, printed `invariant = false` | no such property |
+| 2 | `select(cmpi slt a b, a, b)` canonicalizes to `arith.minsi` (`SelectCmpIToMinMax`) | no such pattern |
+
+Checked by putting those three back in a local mlirpass (and dropping `invariant`): all 699 match. With 0.6.5 /
+0.8.11 all 699 matched (mlirpass's `scf-for-trip-count` feature, gone since: 23.1.5 does it upstream).
 
 `FLOOR` in `tests/passes.rs` only goes up.
 
