@@ -62,13 +62,18 @@ struct Affine {
 }
 
 impl Affine {
-    fn add_term(&mut self, axis: usize, mut v: Vec<i64>, sign: i64) {
+    /// 加上第 `axis` 根轴上的一项（乘上 `sign`）。同轴已有一项而长度不同（一边是 broadcast 之前长 1 的那根轴）认不出，返回 `None`。
+    fn add_term(&mut self, axis: usize, mut v: Vec<i64>, sign: i64) -> Option<()> {
         v.iter_mut().for_each(|x| *x *= sign);
         if let Some(t) = self.terms.iter_mut().find(|t| t.axis == axis) {
+            if t.v.len() != v.len() {
+                return None;
+            }
             t.v.iter_mut().zip(&v).for_each(|(a, b)| *a += b);
-            return;
+            return Some(());
         }
         self.terms.push(Term { axis, v });
+        Some(())
     }
 }
 
@@ -139,7 +144,7 @@ impl Folder<'_, '_, '_> {
             if shape.len() != 1 {
                 return None;
             }
-            out.add_term(0, data, 1);
+            out.add_term(0, data, 1)?;
             return Some(out);
         }
         let def = self.c.body.def_op(v)?;
@@ -147,7 +152,7 @@ impl Folder<'_, '_, '_> {
         match b.kind(def) {
             Some(Kind::TtMakeRange) => {
                 let start = b.int_attr(def, "start")? as i64;
-                out.add_term(0, (0..shape[0]).map(|i| start + i).collect(), 1);
+                out.add_term(0, (0..shape[0]).map(|i| start + i).collect(), 1)?;
                 Some(out)
             }
             Some(Kind::TtSplat) => {
@@ -168,7 +173,7 @@ impl Folder<'_, '_, '_> {
                 out.scalar = self.scalar_combine(l.scalar, r.scalar, sub);
                 out.c0 = if sub { l.c0 - r.c0 } else { l.c0 + r.c0 };
                 for t in &r.terms {
-                    out.add_term(t.axis, t.v.clone(), if sub { -1 } else { 1 });
+                    out.add_term(t.axis, t.v.clone(), if sub { -1 } else { 1 })?;
                 }
                 Some(out)
             }
@@ -209,7 +214,7 @@ impl Folder<'_, '_, '_> {
                     return Some(out);
                 }
                 let data = l.terms[0].v.iter().map(|x| apply(x + l.c0)).collect();
-                out.add_term(l.terms[0].axis, data, 1);
+                out.add_term(l.terms[0].axis, data, 1)?;
                 Some(out)
             }
             Some(Kind::TtExpandDims) => {
@@ -331,7 +336,7 @@ impl Folder<'_, '_, '_> {
         d.scalar = self.scalar_combine(l.scalar, r.scalar, true);
         d.c0 = l.c0 - r.c0;
         for t in &r.terms {
-            d.add_term(t.axis, t.v.clone(), -1);
+            d.add_term(t.axis, t.v.clone(), -1)?;
         }
         let shape = self.c.body.ty(lv).dims()?;
         let f32t = Type::tensor(&shape, Type::Float(FloatKind::F32));

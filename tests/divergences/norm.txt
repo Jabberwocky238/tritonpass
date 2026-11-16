@@ -4,3 +4,5 @@
 regress__norm__bool_ptr.0#0      参照只换入口块参数与 op 结果，scf.for 体的块参数留着 ptr<i1>，过不了它自己的校验（tt.addptr 的结果与指针类型不符）
 regress__norm__bool_ptr.0#1      参照不换 scf.while 体与非入口块的块参数，留着 ptr<i1>，过不了它自己的校验
 regress__norm__bool_ptr.0#2      参照不换函数类型的结果，tt.return 的 ptr<i8> 与函数结果 ptr<i1> 不符，过不了它自己的校验
+regress__norm__iota_term_length.0#0      参照把同一根轴上长 1 与长 8 的两项逐位相加，断言失败（idx < size()）；tritonpass 认不出、不改
+regress__norm__iota_term_length.0#1      参照只把长 1 的项加到长 8 那项的第一位，折出错的向量 [3, 1, 2, …, 7]（应是 [3, 4, …, 10]）；tritonpass 认不出、不改
