@@ -1,5 +1,7 @@
 //! 结构化访存的窗口：`tts.make_tptr` 的平坦偏移拆回逐维下标偏移，行距分类，建视图前的规划。
 //! structured-to-memref 建视图用它；下游的拒收、访问摘要也可以复用。
+use std::collections::BTreeSet;
+
 use mlirformat::Type;
 use mlirpass::{Body, Def, OpId, ValueId};
 
@@ -269,10 +271,16 @@ impl Window {
         out
     }
 
-    /// 同一个基址在任何地方被 tts.store 写，都算被写。
-    pub fn is_written(b: &Body<'_>, op: OpId) -> bool {
-        let base = b.opd(op, 0);
-        b[base].uses.iter().any(|u| b.is(u.op, Kind::TtsMakeTptr) && b[b.res(u.op, 0)].uses.iter().any(|w| b.is(w.op, Kind::TtsStore)))
+    /// 被 tts.store 写的基址：同一个基址在任何地方经 tts.make_tptr 交给 tts.store，都算被写。整个 `root` 一次算好，
+    /// 读的预检按基址查（每读一次都扫一遍基址的全部用处，同一个基址读得多的 kernel 是平方的）。
+    pub fn written_bases(b: &Body<'_>, root: OpId) -> BTreeSet<ValueId> {
+        let mut out = BTreeSet::new();
+        b.walk(root, &mut |o| {
+            if b.is(o, Kind::TtsStore) {
+                out.extend(b[o].operands.iter().filter_map(|v| b.def_of(*v, Kind::TtsMakeTptr)).map(|m| b.opd(m, 0)));
+            }
+        });
+        out
     }
 
     /// mask 的各维恰好等于 tile 的静态尺寸。

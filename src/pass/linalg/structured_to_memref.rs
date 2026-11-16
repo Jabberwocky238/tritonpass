@@ -4,8 +4,10 @@
 //! subview + `linalg.copy` + `bufferization.to_tensor`，`tts.store` ⇒ subview + `bufferization.materialize_in_destination`；
 //! 写法 G 的标量 `tts.gather` ⇒ `memref.load`；`tts.make_gather_scatter_tptr` 的读写按行拆成循环（`LoadConverter::rewriteGather`、
 //! `StoreConverter::rewriteScatter`）。
+use std::collections::BTreeSet;
+
 use mlirformat::{Attribute, Dim, Error, Shaped, ShapedKind, StridedLayout, Type};
-use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
+use mlirpass::{Body, ConversionConfig, ConversionPattern, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
 
 use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values};
 use crate::pass::ofr::{Ofr, OfrBuilder};
@@ -21,6 +23,7 @@ pub fn structured_to_memref<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Err
     let i = patterns.converter(&tc);
     WithTc::populate(&mut patterns, i);
     NoTc::populate(&mut patterns);
+    patterns.add(Load { written: Window::written_bases(body, op) });
     let mut target = ConversionTarget::default();
     for d in ["func", "arith", "math", "linalg", "affine", "scf", "cf", "tensor", "bufferization", "memref"] {
         target.legal_dialect(d);
@@ -203,19 +206,38 @@ impl WithTc {
     }
 }
 
+/// `LoadConverter`：tts.load。读的预检要知道基址有没有在别处被写（零行距只许只读广播）；被写的基址在转换之前一次算好
+/// （[`Window::written_bases`]），转换里原来的 op 都还在，答案不变。
+struct Load {
+    written: BTreeSet<ValueId>,
+}
+
+impl ConversionPattern for Load {
+    fn name(&self) -> &'static str {
+        "LoadConverter"
+    }
+
+    fn root(&self) -> Option<&str> {
+        Some(Kind::TtsLoad.name())
+    }
+
+    fn rewrite(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+        NoTc::load(cr, op, o, &self.written)
+    }
+}
+
 /// 不带类型转换器的模式（读写）。
 struct NoTc;
 
-#[patterns]
 impl NoTc {
-    #[convert("tts.load")]
-    fn load(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
+    /// [`Load`] 的体：`written` 是被 tts.store 写的基址。
+    fn load(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>], written: &BTreeSet<ValueId>) -> bool {
         let b = &*cr.rw.body;
         if let Some(gs) = b.def_of(b.opd(op, 0), Kind::TtsMakeGatherScatterTptr) {
             return GatherScatter::of(b, gs).load(cr, op, o[0][0]);
         }
         let Some(make) = b.def_of(b.opd(op, 0), Kind::TtsMakeTptr) else { return false };
-        if !Window::check(b, make, Window::is_written(b, make), &mut Vec::new()) {
+        if !Window::check(b, make, written.contains(&b.opd(make, 0)), &mut Vec::new()) {
             return false;
         }
         let t = Tptr::of(b, make);
@@ -252,7 +274,10 @@ impl NoTc {
         cr.replace_values(op, &[tv]);
         true
     }
+}
 
+#[patterns]
+impl NoTc {
     #[convert("tts.store")]
     fn store(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
