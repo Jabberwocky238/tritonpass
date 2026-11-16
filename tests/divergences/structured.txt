@@ -7,3 +7,5 @@ regress__structured__t2u_static_offsets.0#1                       同上（基�
 regress__structured__mask_expand_dims_const.0#0                   参照 parseExpandDims 按 axis 插入越界断言崩溃（常量 mask 只剩标量）；tritonpass 报警告、认不出这个 mask
 regress__structured__mask_expand_dims_rank.0#0                    参照 parseExpandDims 按 axis 插入越界断言崩溃（与的分析没有维）；tritonpass 报警告、认不出这个 mask
 regress__structured__mask_expand_dims_rank.0#1                    参照 parseExpandDims 按维下标改 dims 越界断言崩溃；tritonpass 报警告、认不出这个 mask
+regress__structured__loop_result_init_index.0#0                   参照拿第二个循环的下标取第一个循环的结果，getResult 越界断言崩溃；tritonpass 报警告、这个指针不当结构化的处理
+regress__structured__loop_result_init_index.0#1                   同上，越过第一个循环的初值个数（getInitArgs 越界断言崩溃）

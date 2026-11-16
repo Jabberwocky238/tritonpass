@@ -356,7 +356,11 @@ impl PtrAnalysis {
     }
 
     /// 循环第 `index` 个初值的状态（`getLoopInitArgPtrState`）。
-    fn init_state(&self, b: &Body<'_>, l: OpId, index: usize) -> Option<PtrState> {
+    fn init_state(&self, b: &mut Body<'_>, l: OpId, index: usize) -> Option<PtrState> {
+        if 3 + index >= b[l].operands.len() {
+            Self::carried_out_of_range(b, l, index);
+            return None;
+        }
         let ptr = b.opd(l, 3 + index);
         if let Some(g) = b.def_of(ptr, Kind::TtsGetStructuredState)
             && let Some(k) = self.known.get(&b.opd(g, 0))
@@ -370,9 +374,15 @@ impl PtrAnalysis {
     }
 
     /// 迭代参数（`iter = true`）或结果的状态：偏移与行距换成随后那几个携带值（`reconcileLoopPtrState`）。
-    fn loop_state(&self, b: &Body<'_>, l: OpId, index: usize, iter: bool) -> Option<PtrState> {
+    fn loop_state(&self, b: &mut Body<'_>, l: OpId, index: usize, iter: bool) -> Option<PtrState> {
         let st = self.init_state(b, l, index)?;
         if !st.is_structured(b) {
+            return None;
+        }
+        let need = index + 1 + if st.rank() == 0 { 1 } else { 2 * st.rank() };
+        let have = if iter { b[b.entry(l, 0)].args.len() - 1 } else { b[l].results.len() };
+        if need > have {
+            Self::carried_out_of_range(b, l, index);
             return None;
         }
         let get = |k: usize| if iter { b[b.entry(l, 0)].args[k + 1] } else { b.res(l, k) };
@@ -391,6 +401,13 @@ impl PtrAnalysis {
             }
         }
         Some(n)
+    }
+
+    /// 第 `index` 个携带值（连同随后的偏移、行距）超出了 scf.for 的携带值个数。照 C++，循环的初值是另一个循环的结果时
+    /// 拿的是这个循环的下标（见 [`Self::init_state`]），会走到这里；C++ 越界断言崩溃，这里报警告，这个携带值不当结构化的处理。
+    fn carried_out_of_range(b: &mut Body<'_>, l: OpId, index: usize) {
+        let d = Diagnostic::at(b, l, Severity::Warning, format!("指针分析：scf.for 第 {index} 个携带值连同偏移、行距超出了携带值的个数，不当结构化的处理"));
+        b.report(d);
     }
 
     fn rewrite_addptr(&mut self, b: &mut Body<'_>, op: OpId) -> bool {
