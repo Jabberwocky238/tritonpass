@@ -158,6 +158,11 @@ impl WithTc {
     #[convert("tts.make_tptr")]
     fn make_tptr(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let t = Tptr::of(cr.rw.body, op);
+        // 0 维的没有窗口可建（C++ 取第 0 维时越界断言）：报错，转换失败
+        if t.sizes.is_empty() {
+            cr.rw.body.emit_error(op, "tts.make_tptr 是 0 维的：结构化指针至少要有一维才建得出视图");
+            return false;
+        }
         let Ok(plan) = Window::plan(cr.rw.body, &t) else { return false };
         let base = o[0][0];
         let rank = t.sizes.len();
