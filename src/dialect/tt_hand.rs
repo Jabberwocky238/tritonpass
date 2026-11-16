@@ -394,6 +394,7 @@ impl Print for StoreOp<'_> {
         if let Some(b) = non_default(&self.boundary_check, &empty_i32_array()) {
             attrs.push(NamedAttr::of("boundaryCheck", b.owned()));
         }
+        attrs.sort_by(|a, b| a.name.cmp(&b.name));
         p.attr_dict("", &attrs, &[])?;
         write!(p, " : {}", self.ptr_ty)?;
         p.loc(&self.loc)
@@ -571,6 +572,7 @@ impl Print for GatherOp<'_> {
         if self.efficient_layout {
             attrs.push(NamedAttr { name: "efficient_layout".into(), value: None });
         }
+        attrs.sort_by(|a, b| a.name.cmp(&b.name));
         p.attr_dict("", &attrs, &[])?;
         p.write_str(" : ")?;
         print_functional(p, &[&self.src_ty, &self.indices_ty], &[&self.result])?;
@@ -870,6 +872,7 @@ impl Print for DotOp<'_> {
         if let Some(m) = non_default(&self.max_num_imprecise_acc, &zero) {
             attrs.push(NamedAttr::of("maxNumImpreciseAcc", m.owned()));
         }
+        attrs.sort_by(|a, b| a.name.cmp(&b.name));
         p.attr_dict("", &attrs, &[])?;
         write!(p, " : {} * {} -> {}", self.a_ty, self.b_ty, self.d)?;
         p.loc(&self.loc)
@@ -958,6 +961,7 @@ impl Print for MakeTensorPtrOp<'_> {
         print_groups(p, &self.rest, 3)?;
         let mut attrs = self.attrs.clone();
         attrs.push(NamedAttr::of("order", self.order.owned()));
+        attrs.sort_by(|a, b| a.name.cmp(&b.name));
         p.attr_dict("", &attrs, &[])?;
         p.write_str(" : ")?;
         print_stripped(p, &self.result)?;
@@ -1015,6 +1019,7 @@ impl Print for MakeTensorDescOp<'_> {
         if let Some(pad) = self.padding.filter(|x| *x != PaddingOption::Zero) {
             attrs.push(NamedAttr::of("padding", Attribute::of_int(pad as i128, int_ty(32))));
         }
+        attrs.sort_by(|a, b| a.name.cmp(&b.name));
         p.attr_dict("", &attrs, &[])?;
         p.write_str(" : ")?;
         print_stripped(p, &self.base_ty)?;
