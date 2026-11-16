@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mlirformat::{Error, Type};
 use mlirpass::{Body, Diagnostic, OpData, OpId, PassManager, Passes, Severity, ValueId, pass};
 
-use crate::ir::{TtBuilder, dense_i32, int, integer};
+use crate::ir::{TtBuilder, dense_i32, dense_i64, int, integer};
 use crate::{Ir, Kind};
 use mlirpass::{Quiet, Rewriter};
 
@@ -52,6 +52,26 @@ impl Unstructured {
             Type::Shaped(_) => Type::tensor(&t.dims().unwrap_or_default(), int(bits)),
             _ => int(bits),
         }
+    }
+
+    /// 偏移全是静态的 tts.make_tptr：第 0 维的偏移换成同值的 index 常量，插在动态偏移那一段（操作数 `at`）。没有偏移（秩 0）、
+    /// 段长不全时不动，返回 false。
+    fn dynamic_offset(b: &mut Body<'_>, op: OpId, at: usize) -> bool {
+        let mut offsets = crate::ir::dense_values(b[op].get("static_offsets"));
+        let mut seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
+        let (Some(&first), 4) = (offsets.first(), seg.len()) else { return false };
+        let mut q = Quiet;
+        let mut c = Rewriter::new(b, &mut q);
+        c.before_op(op);
+        let v = c.scalar(integer(64, i128::from(first)), Type::Index);
+        let mut operands = b[op].operands.to_vec();
+        operands.insert(at, v);
+        b.set_operands(op, operands);
+        offsets[0] = crate::ir::DYNAMIC;
+        seg[2] = 1;
+        b[op].set("static_offsets", dense_i64(&offsets));
+        b[op].set("operandSegmentSizes", dense_i32(&seg));
+        true
     }
 
     #[allow(clippy::too_many_lines)]
@@ -230,14 +250,20 @@ impl Unstructured {
                 }
                 Some(Kind::TtsMakeTptr | Kind::TtMakeTensorPtr) => {
                     let (p, _, _, base_off) = self.map[&b.opd(op, 0)].clone();
-                    b.set_operand(op, 0, p);
                     // 第一个动态偏移操作数（tts.make_tptr：基址、行距之后；tt.make_tensor_ptr：shape、strides 之后）
                     let at = if b.is(op, Kind::TtsMakeTptr) {
                         let seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
-                        1 + seg.get(1).copied().unwrap_or(0) as usize
+                        let at = 1 + seg.get(1).copied().unwrap_or(0) as usize;
+                        // 偏移可以全是静态的（基址是 tt.int_to_ptr 这类不是实参的指针时）：C++ 照样取第一个动态偏移，越界断言。
+                        // 这里先把第 0 维的偏移换成同值的动态操作数，再照常加上基址的偏移（换不了就整条不动）
+                        if seg.get(2) == Some(&0) && !Self::dynamic_offset(b, op, at) {
+                            return false;
+                        }
+                        at
                     } else {
                         1 + 2 * (b[op].operands.len() - 1) / 3
                     };
+                    b.set_operand(op, 0, p);
                     let cur = b.opd(op, at);
                     let (bt, ct) = (b.ty(base_off).clone(), b.ty(cur).clone());
                     let mut q = Quiet;
