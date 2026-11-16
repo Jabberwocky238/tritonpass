@@ -86,7 +86,7 @@ impl Sig {
         if let Some(entry) = entry {
             cr.apply_signature_conversion(entry, &sig, Some(converter));
         }
-        let nt = FunctionType { inputs: sig.converted_types().to_vec(), results, ..ft };
+        let nt = FunctionType { inputs: sig.converted_types().to_vec(), results };
         cr.modify(op, |b| b[op].set("function_type", Attribute::Type(Type::Function(Box::new(nt)))));
         true
     }

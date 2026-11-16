@@ -40,21 +40,21 @@ pub(crate) struct Mem;
 
 impl Mem {
     fn converter<'c>() -> TypeConverter<'c> {
+        fn cast<'a>(rw: &mut Rewriter<'_, 'a>, ty: &Type<'a>, inputs: &[ValueId]) -> ValueId {
+            let c = rw.create(OpData::named("builtin.unrealized_conversion_cast").operands(inputs), core::slice::from_ref(ty));
+            rw.body[c].results[0]
+        }
         let mut tc = TypeConverter::default();
         tc.conversion(|t| Some(Some(vec![t.clone()])));
         tc.conversion(|t| match t {
             Type::Extended(e) if e.name == "tt.ptr" => Some(Some(vec![Self::memref(&[Dim::DYNAMIC], pointee(t), None)])),
             _ => None,
         });
-        fn cast<'a>(rw: &mut Rewriter<'_, 'a>, ty: &Type<'a>, inputs: &[ValueId]) -> Option<ValueId> {
-            let c = rw.create(OpData::named("builtin.unrealized_conversion_cast").operands(inputs), core::slice::from_ref(ty));
-            Some(rw.body[c].results[0])
-        }
         tc.target(|rw, tys, inputs, _| match tys {
-            [ty] => cast(rw, ty, inputs).map(|v| vec![v]),
+            [ty] => Some(vec![cast(rw, ty, inputs)]),
             _ => None,
         });
-        tc.source(|rw, ty, inputs| cast(rw, ty, inputs));
+        tc.source(|rw, ty, inputs| Some(cast(rw, ty, inputs)));
         tc
     }
 
@@ -331,7 +331,7 @@ impl NoTc {
         let dynv = if load {
             let seg = dense_values(b[op].get("operandSegmentSizes"));
             let nd = usize::try_from(seg.get(1).copied().unwrap_or(0))?;
-            &ops[1..1 + nd]
+            &ops[1..=nd]
         } else {
             &ops[2..]
         };
@@ -434,13 +434,13 @@ impl GatherScatter {
 
     /// 循环上界（mask 收窄）、空循环与（有非结构化 mask 时）其中的 scf.if；插入点留在体的开头（或 then 里）。
     /// 返回（循环，0，1，归纳变量，各维尺寸）。
-    fn begin(&self, cr: &mut Cr<'_, '_, '_>, mask: Option<Vec<Ofr>>) -> (OpId, ValueId, ValueId, ValueId, Vec<Ofr>) {
+    fn begin(&self, cr: &mut Cr<'_, '_, '_>, mask: Option<&[Ofr]>) -> (OpId, ValueId, ValueId, ValueId, Vec<Ofr>) {
         let mut size = cr.rw.body.ty(self.offset).dims().unwrap_or_default()[0];
         let mut sizes: Vec<Ofr> = self.sizes.iter().map(|s| Ofr::idx(*s)).collect();
         sizes[self.dim] = Ofr::idx(1);
         let lb = Self::index(cr, 0);
         let mut ub = Self::index(cr, size);
-        if let Some(dims) = &mask {
+        if let Some(dims) = mask {
             match dims[self.dim] {
                 Ofr::I(v, _) => {
                     let v = if v == 0 && self.mask.is_some() { size } else { v };
@@ -497,7 +497,7 @@ impl GatherScatter {
         if let Some(x) = other {
             NoTc::fill(cr, x, alloc);
         }
-        let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.clone());
+        let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.as_deref());
         let tv = Mem::create(cr, OpData::build(Kind::BufferizationToTensor.name()).operands(&[alloc]).with("restrict", Attribute::Unit).with("writable", Attribute::Unit), rt);
         cr.replace_values(op, &[tv]);
         self.enter(cr, l, iv);
@@ -523,7 +523,7 @@ impl GatherScatter {
     fn store(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, memref: ValueId, value: ValueId) -> bool {
         let Ok(mask) = NoTc::mask(cr.rw.body, op, false) else { return false };
         let offset = self.index_offsets(cr);
-        let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.clone());
+        let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.as_deref());
         let _ = l;
         self.enter(cr, l, iv);
         let elt = Mem::create(cr, OpData::build(Kind::TensorExtract.name()).operands(&[offset, iv]), Type::Index);

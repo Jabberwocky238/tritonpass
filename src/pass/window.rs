@@ -51,7 +51,7 @@ impl Tptr {
         Some(Self {
             base: b.opd(op, 0),
             sizes: dense_values(b[op].get("sizes")),
-            strides: Self::mixed(b, op, "static_strides", &ops[1..1 + s]),
+            strides: Self::mixed(b, op, "static_strides", &ops[1..=s]),
             offsets: Self::mixed(b, op, "static_offsets", &ops[1 + s..1 + s + o]),
             shape: Self::mixed(b, op, "static_shape", &ops[1 + s + o..1 + s + o + sh]),
             order: dense_values(b[op].get("order")),

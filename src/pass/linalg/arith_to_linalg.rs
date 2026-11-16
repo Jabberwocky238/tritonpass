@@ -18,6 +18,7 @@ type Cr<'r, 'a, 'p> = ConversionRewriter<'r, 'a, 'p>;
 
 /// 选项同 triton-shared 分叉（dope-opt）的 `Passes.td`，名字与缺省值一样。
 #[pass("triton-arith-to-linalg", on = "builtin.module")]
+#[expect(clippy::struct_excessive_bools, reason = "选项照 dope-opt 的 `Passes.td`")]
 pub struct TritonArithToLinalg {
     /// tt.get_program_id / tt.get_num_programs ⇒ 函数末尾追加的 6 个 i32 参数（num_programs ×3 在前，program_id ×3 在后）
     #[opt("pids-to-func-args", default = true)]
@@ -165,9 +166,9 @@ impl L {
     }
 
     /// `linalg.fill`。
-    fn fill<'a>(cr: &mut Cr<'_, 'a, '_>, value: ValueId, init: ValueId) -> ValueId {
+    fn fill(cr: &mut Cr<'_, '_, '_>, value: ValueId, init: ValueId) -> ValueId {
         let ty = Self::ty(cr, init);
-        let o = cr.structured("linalg.fill", &[value], &[init], &[ty.clone()], Vec::new(), &mut |cr, a| {
+        let o = cr.structured("linalg.fill", &[value], &[init], core::slice::from_ref(&ty), Vec::new(), &mut |cr, a| {
             let et = ty.element_type().clone();
             vec![cr.cast_scalar(a[0], &et, false)]
         });
@@ -177,7 +178,7 @@ impl L {
     /// 标量 `arith.constant`。
     fn constant<'a>(cr: &mut Cr<'_, 'a, '_>, value: Scalar, ty: &Type<'a>) -> ValueId {
         let d = <Body<'a> as Build<'a>>::constant_data(value, ty);
-        let o = cr.rw.create(d, &[ty.clone()]);
+        let o = cr.rw.create(d, core::slice::from_ref(ty));
         cr.rw.body[o].results[0]
     }
 
@@ -198,7 +199,7 @@ impl Tt {
         if !matches!(b.ty(b.opd(op, 1)), Type::Shaped(_)) {
             return false;
         }
-        Self::scalar_in_generic(cr, op, Vec::new())
+        Self::scalar_in_generic(cr, op, &[])
     }
 
     /// `TensorOpConverter<LoadOp / IntToPtrOp / PtrToIntOp / BitcastOp>`（tensor-ptr-to-linalg）：out 是一块 tensor.empty。
@@ -209,14 +210,14 @@ impl Tt {
             return false;
         }
         let init = cr.empty(&L::dims(&rt), rt.element_type().clone(), &[]);
-        Self::scalar_in_generic(cr, op, vec![init])
+        Self::scalar_in_generic(cr, op, &[init])
     }
 
     /// `AddPtrConverter`（addptr-to-linalg）：张量上的 tt.addptr ⇒ 包着标量 tt.addptr 的 linalg.generic，out 就是指针操作数。
     #[convert("tt.addptr", when = addptr)]
     fn addptr(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let ptr = cr.rw.body.opd(op, 0);
-        Self::scalar_in_generic(cr, op, vec![ptr])
+        Self::scalar_in_generic(cr, op, &[ptr])
     }
 
     #[convert("tt.splat")]
@@ -254,7 +255,7 @@ impl Tt {
         let results = (0..rank).skip(diff).zip(&sd).map(|(i, s)| if *s == 1 { AffineExpr::Const(0) } else { AffineExpr::Dim(i) }).collect();
         let maps = [AffineMap { dims: rank, syms: 0, results }, AffineMap::identity(rank)];
         let init = cr.empty(&rd, rt.element_type().clone(), &[]);
-        let g = cr.generic(&[rt.clone()], &[src], &[init], &maps, &L::par(rd.len()), &mut |_, a| vec![a[0]]);
+        let g = cr.generic(core::slice::from_ref(&rt), &[src], &[init], &maps, &L::par(rd.len()), &mut |_, a| vec![a[0]]);
         let bdims: Vec<i64> = (0..sd.len()).filter(|i| rd[*i] != sd[*i]).map(len_i64).collect();
         cr.rw.body[g].set("broadcastDims", dense_i64(&bdims));
         let gv = cr.rw.body[g].results[0];
@@ -316,7 +317,7 @@ impl Tt {
         let start = cr.rw.body.int_attr(op, "start").unwrap_or(0);
         let init = cr.empty(&L::dims(&rt), et.clone(), &[]);
         let k = (start != 0).then(|| L::constant(cr, crate::ir::integer(et.bit_width().unwrap_or(32), start), &et));
-        let g = cr.generic(&[rt.clone()], &[], &[init], &[AffineMap::identity(1)], &[true], &mut |cr, _| {
+        let g = cr.generic(core::slice::from_ref(&rt), &[], &[init], &[AffineMap::identity(1)], &[true], &mut |cr, _| {
             let i = cr.op1(Kind::LinalgIndex.name(), &[], Type::Index);
             let last = cr.rw.body.def_op(i).expect("linalg.index");
             cr.rw.body[last].set("dim", Attribute::integer(0, Type::int(64)));
@@ -395,8 +396,8 @@ impl Tt {
     #[convert("tt.extern_elementwise")]
     fn extern_elementwise(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
-        let pure = matches!(b[op].get("pure"), Some(Attribute::Bool(true)) | Some(Attribute::Unit));
-        let symbol = b[op].get("symbol").and_then(|a| a.text().ok()).map(|t| t.to_string()).unwrap_or_default();
+        let pure = matches!(b[op].get("pure"), Some(Attribute::Bool(true) | Attribute::Unit));
+        let symbol = b[op].get("symbol").and_then(|a| a.text().ok()).unwrap_or_default();
         let srcs = b[op].operands.clone();
         let Some(k) = Extern::of(&symbol, srcs.len()) else { return false };
         if !pure {
@@ -433,7 +434,7 @@ impl Tt {
             _ => return false,
         };
         let maps = Attribute::Array(maps.iter().map(|m| Attribute::from(&AffineMap::parse(m).expect("affine map"))).collect());
-        let m = cr.structured(name, &[a, bb], &[acc], &[rt.clone()], vec![("indexing_maps", maps)], &mut |cr, x| {
+        let m = cr.structured(name, &[a, bb], &[acc], core::slice::from_ref(&rt), vec![("indexing_maps", maps)], &mut |cr, x| {
             let ot = cr.rw.body[x[2]].ty.clone();
             let v1 = cr.cast_scalar(x[0], &ot, false);
             let v2 = cr.cast_scalar(x[1], &ot, false);
@@ -701,7 +702,7 @@ impl Tt {
     fn dense_constant(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let v = cr.rw.body[op].results[0];
         let Some(c) = cr.rw.body.constant(v) else { return false };
-        let Some(first) = c.values.first().cloned() else { return false };
+        let Some(first) = c.values.first().copied() else { return false };
         let rt = L::rty(cr, op);
         let et = rt.element_type().clone();
         let k = L::constant(cr, first, &et);
@@ -740,7 +741,7 @@ impl Tt {
         let ops = b.block_ops(blk);
         let res = |o: OpId| b.res(o, 0);
         let is = |o: OpId, k: Kind, x: ValueId, y: ValueId| b.is(o, k) && b.opd(o, 0) == x && b.opd(o, 1) == y;
-        let p = |o: OpId| b.int_attr(o, "predicate").map(i128::from);
+        let p = |o: OpId| b.int_attr(o, "predicate");
         let [eq, slt, and, cmp, or, vsel, isel, ret] = ops[..] else { return false };
         let ok = is(eq, Kind::ArithCmpf, cv, rv)
             && p(eq) == Some(CMPF_OEQ)
@@ -799,7 +800,7 @@ impl Tt {
 
     /// 指针张量上的 op ⇒ `linalg.generic`：各维 parallel、映射全是恒等，体里是同名同属性的标量 op（照 C++，操作数用原 op 的，
     /// 不用转换之后的），结果按元素类型。
-    fn scalar_in_generic(cr: &mut Cr<'_, '_, '_>, op: OpId, outputs: Vec<ValueId>) -> bool {
+    fn scalar_in_generic(cr: &mut Cr<'_, '_, '_>, op: OpId, outputs: &[ValueId]) -> bool {
         let b = &*cr.rw.body;
         let inputs = b[op].operands.to_vec();
         let rts: Vec<Type<'_>> = b[op].results.iter().map(|r| b.ty(*r).clone()).collect();
@@ -809,7 +810,7 @@ impl Tt {
         let ets: Vec<Type<'_>> = rts.iter().map(|t| t.element_type().clone()).collect();
         let (name, properties, attributes) = (b[op].name.clone(), b[op].properties.clone(), b[op].attributes.clone());
         let n = inputs.len();
-        let g = cr.generic(&rts, &inputs, &outputs, &maps, &vec![true; rank as usize], &mut |cr, a| {
+        let g = cr.generic(&rts, &inputs, outputs, &maps, &vec![true; rank as usize], &mut |cr, a| {
             let mut d = OpData::named(name.clone()).operands(&a[..n]);
             d.properties.clone_from(&properties);
             d.attributes.clone_from(&attributes);
@@ -895,7 +896,7 @@ impl Elementwise {
 }
 
 impl ConversionPattern for Elementwise {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "ConvertAnyElementwiseMappableOpOnRankedTensors"
     }
 
@@ -1093,8 +1094,8 @@ impl Reassoc {
         if map.len() != dst.len() {
             return None;
         }
-        for d in s..src.len() {
-            if src[d] != 1 {
+        for (d, &x) in src.iter().enumerate().skip(s) {
+            if x != 1 {
                 return None;
             }
             map.last_mut().expect("至少一组").push(len_i64(d));
@@ -1158,7 +1159,7 @@ impl TritonArithToLinalg {
     /// `addProgramInfo`：函数类型与入口块末尾追加 6 个 i32（num_programs ×3，program_id ×3；块参数取函数的位置），
     /// 有参数属性时补 6 个空的；`sys` 时这 6 个各带 `dope.sys`（后备写法 B′）。只是声明、没有入口块的（C++ 的
     /// `getBody().front()` 在这里断言）报错。
-    fn add_program_info<'a>(b: &mut Body<'a>, f: OpId, sys: bool) -> Result<(), Error> {
+    fn add_program_info(b: &mut Body<'_>, f: OpId, sys: bool) -> Result<(), Error> {
         const NAMES: [&str; 6] = ["num_programs_x", "num_programs_y", "num_programs_z", "program_id_x", "program_id_y", "program_id_z"];
         let Some(Attribute::Type(Type::Function(ft))) = b[f].get("function_type").cloned() else { return Ok(()) };
         let Some(entry) = b[f].regions.first().and_then(|r| b[*r].blocks.first().copied()) else {
@@ -1218,7 +1219,7 @@ impl TritonArithToLinalg {
             d.loc.clone_from(&b[f].loc);
             let n = b.create(d, &[]);
             let regions = b[f].regions.clone();
-            for r in regions.iter() {
+            for r in &regions {
                 b[*r].parent = n;
             }
             b[n].regions = regions;
@@ -1239,7 +1240,7 @@ impl TritonArithToLinalg {
 }
 
 impl Run for TritonArithToLinalg {
-    fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
+    fn run(&self, body: &mut Body<'_>, op: OpId) -> Result<(), Error> {
         if self.pids_to_func_args && self.pids_to_gpu {
             body.emit_error(op, "pids-to-func-args 与 pids-to-gpu 只能取一个");
             return Err(Error::from("triton-arith-to-linalg：选项冲突"));
