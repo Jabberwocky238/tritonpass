@@ -5,7 +5,9 @@
 //! （上游写死了 func.return）；这里直接在 tt.func 上跑 mlirpass 的 `transform_cfg_to_scf`（不可达出口换成 tt.return），用检查点回滚代替副本。
 //!
 //! 多出口的 tt.func 结构化之后，末尾留下纯选择器的死链（零结果、分支皆空的 scf.index_switch，喂给它的 scf.if、
-//! index_castui）：`triton-drop-dead-exit-switch` 只清这一条特定的链（⛔ 通用 canonicalize：会连带吃掉本该被 P0 点名的死值）。
+//! index_castui）：`triton-drop-dead-exit-switch` 只认这几种形态（⛔ 通用 canonicalize：会连带吃掉本该被 P0 点名的死值），
+//! 但认的范围是整个模块，不只是那条链：任何零结果、分支皆空的 scf.index_switch，结果全没人用的 scf.if，没人用的
+//! index_cast(ui) 都会清掉（与 C++ 原版相同）。
 use mlirformat::{Attribute, Error, Str, Type};
 use mlirpass::{BlockId, Body, CfgAt, CfgToScfInterface, ControlFlowToScf, OpData, OpId, PatternSet, RegionId, Rewriter, ValueId, pass, patterns, transform_cfg_to_scf};
 
@@ -119,7 +121,7 @@ pub fn lift_cf_to_scf<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
 }
 
 /// 结构化之后末尾留下的纯选择器死链：零结果、分支皆空的 scf.index_switch，喂给它的、结果没人用的 scf.if，没人用的
-/// index_cast(ui)。只认这几种（⛔ 通用 canonicalize / greedy：greedy 会顺手删别的死值），反复走到没有一条再命中为止。
+/// index_cast(ui)。只认这几种（⛔ 通用 canonicalize / greedy：greedy 会顺手删别的死值），在整个模块里反复走到没有一条再命中为止。
 pub struct DeadExit;
 
 #[patterns]

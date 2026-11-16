@@ -132,7 +132,7 @@ def lit(ref, tests):
             yield f"{base}.{k}", [rename(a) for a in args], src, reference(ref, args, src)
             k += 1
             if "--triton-arith-to-linalg" in args:
-                # 同一条 RUN 换成 gpu 写法再来一份：tritonpass 还没有 args 写法，这份保证转换本身有对拍
+                # 同一条 RUN 换成 gpu 写法再来一份：缺省的 args 写法与 gpu 写法都有对拍
                 gpu = [f"--triton-arith-to-linalg={GPU_REF}" if a == "--triton-arith-to-linalg" else a for a in args]
                 yield f"{base}.{k}", [rename(a) for a in gpu], src, reference(ref, gpu, src)
                 k += 1

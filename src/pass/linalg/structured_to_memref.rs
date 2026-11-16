@@ -2,7 +2,8 @@
 //! `memref<?xT>`（经 `builtin.unrealized_conversion_cast`）；`tts.make_tptr` 只剩根视图（一维行距 1 是参数本身的
 //! `memref.cast`，其余 `memref.reinterpret_cast` 到 `[UNB, …]`）；`tts.load` ⇒ 静态 tile 的 `memref.alloc` + 根上一次
 //! subview + `linalg.copy` + `bufferization.to_tensor`，`tts.store` ⇒ subview + `bufferization.materialize_in_destination`；
-//! 写法 G 的标量 `tts.gather` ⇒ `memref.load`。gather / scatter 的行指针 P6 已拒收，这里不移植。
+//! 写法 G 的标量 `tts.gather` ⇒ `memref.load`；`tts.make_gather_scatter_tptr` 的读写按行拆成循环（`LoadConverter::rewriteGather`、
+//! `StoreConverter::rewriteScatter`）。
 use mlirformat::{Attribute, Dim, Error, Shaped, ShapedKind, StridedLayout, Type};
 use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
 

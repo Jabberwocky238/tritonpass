@@ -31,7 +31,7 @@ passes.with(TritonPasses::add);        // every triton-* pass, by name
 ```
 
 then build a pipeline by name, e.g.
-`builtin.module(triton-to-structured, cse, canonicalize, triton-to-unstructured, triton-arith-to-linalg{grid-encoding=gpu}, structured-to-memref, triton-ptr-to-memref, reconcile-unrealized-casts)`.
+`builtin.module(triton-to-structured, cse, canonicalize, triton-to-unstructured, triton-arith-to-linalg{pids-to-func-args=false pids-to-gpu=true}, structured-to-memref, triton-ptr-to-memref, reconcile-unrealized-casts)`.
 
 ## What is in it
 

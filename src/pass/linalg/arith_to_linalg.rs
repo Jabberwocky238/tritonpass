@@ -3,7 +3,8 @@
 //! `linalg.generic`（上游 `ElementwiseToLinalg`，最后才试），program id 换成 gpu.block_id / gpu.grid_dim；转换后贪婪跑一遍
 //! （折叠、常量提到入口），最后 tt.func / tt.return 换成 func.func / func.return。
 //!
-//! 只移植了语料与合同用得到的模式：cat、split、join、mulhiui、argmin / argmax、assert、call 没有（P0 已拒收）。
+//! triton-shared 登记的转换模式除 `CumSumConverter`（tt.scan ⇒ ttx.cumsum，ttx 方言不在这里）外都移植了，tt.scan 原样留下
+//! （dope-opt 也一样）。
 
 use mlirformat::{AffineExpr, AffineMap, Attribute, Error, FunctionType, NamedAttr, Scalar, Type};
 use mlirpass::{
