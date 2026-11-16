@@ -1,11 +1,12 @@
 # 结构化访存分析（triton-to-structured / triton-to-unstructured）上参照自己的毛病：参照（dope-opt bca398e）在这些块上
 # 断言崩溃或过不了自己的校验器，tritonpass 照常给出正确的输出。一行一块：`<stem>#<块号>  <原因>`。
 
-regress__structured__advance_non_block_state.0#0                  参照断言 state.isBlockPtr() 崩溃；tritonpass 不改写这条 tt.advance
-regress__structured__t2u_static_offsets.0#0                       参照取第一个动态偏移越界断言崩溃（偏移全是静态）；tritonpass 把第 0 维偏移换成动态再加基址偏移
-regress__structured__t2u_static_offsets.0#1                       同上（基址是 tt.addptr，结果偏移是 k + 5）
-regress__structured__mask_expand_dims_const.0#0                   参照 parseExpandDims 按 axis 插入越界断言崩溃（常量 mask 只剩标量）；tritonpass 报警告、认不出这个 mask
-regress__structured__mask_expand_dims_rank.0#0                    参照 parseExpandDims 按 axis 插入越界断言崩溃（与的分析没有维）；tritonpass 报警告、认不出这个 mask
-regress__structured__mask_expand_dims_rank.0#1                    参照 parseExpandDims 按维下标改 dims 越界断言崩溃；tritonpass 报警告、认不出这个 mask
-regress__structured__loop_result_init_index.0#0                   参照拿第二个循环的下标取第一个循环的结果，getResult 越界断言崩溃；tritonpass 报警告、这个指针不当结构化的处理
-regress__structured__loop_result_init_index.0#1                   同上，越过第一个循环的初值个数（getInitArgs 越界断言崩溃）
+regress__structured__advance_non_block_state.0#0  参照断言 state.isBlockPtr() 崩溃；tritonpass 不改写这条 tt.advance
+regress__structured__t2u_static_offsets.0#0       参照取第一个动态偏移越界断言崩溃（偏移全是静态）；tritonpass 把第 0 维偏移换成动态再加基址偏移
+regress__structured__t2u_static_offsets.0#1       同上（基址是 tt.addptr，结果偏移是 k + 5）
+regress__structured__mask_expand_dims_const.0#0   参照 parseExpandDims 按 axis 插入越界断言崩溃（常量 mask 只剩标量）；tritonpass 报警告、认不出这个 mask
+regress__structured__mask_expand_dims_rank.0#0    参照 parseExpandDims 按 axis 插入越界断言崩溃（与的分析没有维）；tritonpass 报警告、认不出这个 mask
+regress__structured__mask_expand_dims_rank.0#1    参照 parseExpandDims 按维下标改 dims 越界断言崩溃；tritonpass 报警告、认不出这个 mask
+regress__structured__loop_result_init_index.0#0   参照拿第二个循环的下标取第一个循环的结果，getResult 越界断言崩溃；tritonpass 报警告、这个指针不当结构化的处理
+regress__structured__loop_result_init_index.0#1   同上，越过第一个循环的初值个数（getInitArgs 越界断言崩溃）
+regress__structured__t2u_rank0_block_ptr.0#0      参照取秩 0 的 tt.make_tensor_ptr 的第一个动态偏移，越界断言崩溃；tritonpass 报 t2u 的警告、这条不动

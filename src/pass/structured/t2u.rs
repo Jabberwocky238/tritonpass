@@ -261,7 +261,13 @@ impl Unstructured {
                         }
                         at
                     } else {
-                        1 + 2 * (b[op].operands.len() - 1) / 3
+                        // tt.make_tensor_ptr：基址之后 shape、strides、offsets 各占秩个操作数。秩 0 没有偏移能加上基址的偏移
+                        // （C++ 照样取下标，越界断言）：整条不动，同上
+                        let rank = (b[op].operands.len() - 1) / 3;
+                        if rank == 0 {
+                            return false;
+                        }
+                        1 + 2 * rank
                     };
                     b.set_operand(op, 0, p);
                     let cur = b.opd(op, at);
