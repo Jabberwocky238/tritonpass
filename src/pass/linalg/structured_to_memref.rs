@@ -353,12 +353,13 @@ impl GatherScatter {
         Self { offset: ops[1], mask, dim: b.int_attr(op, "gather_scatter_dim").unwrap_or(0) as usize, sizes: dense_values(b[op].get("sizes")), strides, offsets, result: b.ty(b.res(op, 0)).owned() }
     }
 
-    /// `getMixedStridesForMemref`：尺寸为 1、行距为常量 0 的维换成累乘的尺寸（从最内一维往外）。
-    fn memref_strides(&self) -> Vec<Ofr> {
+    /// `getMixedStridesForMemref`：尺寸为 1、行距为静态 0 的维换成累乘的尺寸（从最内一维往外）；行距是值的经
+    /// `getAsOpFoldResult` 折成静态（常量 op 定义的就取它的值）。
+    fn memref_strides(&self, b: &Body<'_>) -> Vec<Ofr> {
         let mut out = Vec::new();
         let mut acc = 1i64;
         for (size, stride) in self.sizes.iter().zip(&self.strides).rev() {
-            out.push(if *size == 1 && stride.int() == Some(0) { Ofr::idx(acc) } else { *stride });
+            out.push(if *size == 1 && stride.int() == Some(0) { Ofr::idx(acc) } else { Window::const_int(b, *stride).map_or(*stride, Ofr::idx) });
             acc *= size;
         }
         out.reverse();
@@ -367,7 +368,7 @@ impl GatherScatter {
 
     /// `rewriteGatherScatterPtrElement`：第 `elt` 行的视图（gather 维尺寸 1）。
     fn element(&self, cr: &mut Cr<'_, '_, '_>, memref: ValueId, elt: ValueId) -> ValueId {
-        let strides = self.memref_strides();
+        let strides = self.memref_strides(cr.rw.body);
         let mut offsets = self.offsets.clone();
         offsets[self.dim] = Ofr::V(elt);
         let mut target = Ofr::idx(0);
