@@ -1,0 +1,79 @@
+# 参照（dope-opt bca398e）建在 LLVM 1f126a6d 上，mlirpass 跟 MLIR 23.1.5：这些块的差异全是两版 MLIR 之间的上游变化
+# （README「Tests」一节的表）。一行一块：`<stem>#<块号>  <原因>`。
+#
+#   index_cast 往返折叠        23.1.5 的 index_cast(index_cast(x : A) : B) : A 只在 B 不比 A 窄时折成 x；参照连 index ⇒ i32 ⇒ index 这种
+#                              会截断的往返也折掉
+#   memref.load 的 invariant   23.1.5 的 memref.load 多了 invariant 属性，新建的 op 印 `invariant = false`；参照没有这个属性
+#   select(cmpi) ⇒ min/max     23.1.5 的规范化把 select(cmpi slt a b, a, b) 换成 arith.minsi（SelectCmpIToMinMax）；参照没有这条模式
+#
+# 换 mlirpass 所跟的 MLIR 版本，或用跟同一版 MLIR 的参照重新生成夹具之后，按测试报出的「已经 exact」删掉对应的行。
+
+Conversion__TritonToStructured__addptr_for_more_init_args.0#0                                     index_cast 往返折叠
+Conversion__TritonToStructured__addptr_scalar_for.0#0                                             index_cast 往返折叠
+Conversion__TritonToStructured__addptr_scalar_for_2d.0#0                                          index_cast 往返折叠
+Conversion__TritonToStructured__kernel-03-matrix-multiplication.0#0                               select(cmpi) ⇒ min/max
+Conversion__TritonToUnstructured__kernel-03-matrix-multiplication.0#0                             select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__triton_shared_layer_norm_fwd_fused_f32#0                           index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__triton_shared_layer_norm_fwd_fused_f32.raw#0                       index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__triton_shared_reduce_kernel_2d_f32#0                               index_cast 往返折叠
+pipeline__Inputs__ttir-phase2__tutorial02_softmax_kernel_f32#0                                    index_cast 往返折叠
+pipeline__Inputs__ttir-phase2__tutorial02_softmax_kernel_f32.raw#0                                index_cast 往返折叠
+pipeline__Inputs__ttir-phase2__tutorial05_layer_norm_fwd_fused_bf16#0                             index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__tutorial05_layer_norm_fwd_fused_bf16.raw#0                         index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__tutorial05_layer_norm_fwd_fused_f32#0                              index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__tutorial05_layer_norm_fwd_fused_f32.raw#0                          index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_mean_kernel_f32_tokens#0                                      index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_mean_kernel_f32_tokens.raw#0                                  index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_rms_norm_kernel_bf16#0                                        index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_rms_norm_kernel_bf16.raw#0                                    index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_rms_norm_kernel_bf16_no_weight#0                              index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_rms_norm_kernel_bf16_no_weight.raw#0                          index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_softmax_kernel_f32_vocab#0                                    index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_softmax_kernel_f32_vocab.raw#0                                index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_softmax_kernel_f32_vocab_log#0                                index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase2__vllm_softmax_kernel_f32_vocab_log.raw#0                            index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase3__vllm_matmul_kernel_persistent_bf16_gate_up#0                       index_cast 往返折叠
+pipeline__Inputs__ttir-phase3__vllm_matmul_kernel_persistent_bf16_gate_up.raw#0                   index_cast 往返折叠
+pipeline__Inputs__ttir-phase4__vllm_decode_fwd_kernel_stage1_bf16#0                               index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_decode_fwd_kernel_stage1_bf16.raw#0                           index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_decode_fwd_kernel_stage2_bf16#0                               index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_decode_fwd_kernel_stage2_bf16.raw#0                           index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_kernel_unified_attention_2d_bf16_prefill#0                    memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_kernel_unified_attention_3d_bf16_decode#0                     memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_prefill_fwd_kernel_bf16#0                                     index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_prefill_fwd_kernel_bf16.raw#0                                 index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_reduce_segments_bf16#0                                        memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_reshape_and_cache_kernel_flash_bf16#0                         index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_reshape_and_cache_kernel_flash_bf16.raw#0                     index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_apply_write_kernel#0                                   index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_apply_write_kernel.raw#0                               index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_combine_sampled_and_draft_tokens_kernel#0              index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_combine_sampled_and_draft_tokens_kernel.raw#0          index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_compute_slot_mappings_kernel#0                         index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_gather_block_tables_kernel#0                           index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_get_num_sampled_and_rejected_kernel#0                  index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_get_num_sampled_and_rejected_kernel.raw#0              index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_gumbel_sample_kernel#0                                 index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_gumbel_sample_kernel.raw#0                             index_cast 往返折叠
+pipeline__Inputs__ttir-phase4__vllm_runner_post_update_kernel#0                                   index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_post_update_kernel.raw#0                               index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-phase4__vllm_runner_prepare_pos_seq_lens_kernel#0                          index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_prepare_pos_seq_lens_kernel.raw#0                      index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_prepare_prefill_inputs_kernel#0                        index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-phase4__vllm_runner_prepare_prefill_inputs_kernel.raw#0                    index_cast 往返折叠；memref.load 的 invariant 属性；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-qwen3__argmax_greedy_decode1.argmax_kernel_inner#0                         index_cast 往返折叠
+pipeline__Inputs__ttir-qwen3__argmax_greedy_decode16.argmax_kernel_inner#0                        index_cast 往返折叠
+pipeline__Inputs__ttir-qwen3__cumsum_sampler_decode1.reduce_then_scan_block_sum_kernel_row.raw#0  index_cast 往返折叠
+pipeline__Inputs__ttir-qwen3__gather_logprobs_decode1.gather_rows_kernel#0                        index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__gather_logprobs_decode1.gather_rows_kernel.raw#0                    index_cast 往返折叠；memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__index_hidden_rows_decode1.index_select_rows_kernel#0                memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__index_hidden_rows_decode1.index_select_rows_kernel.raw#0            memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__index_hidden_rows_decode16.index_select_rows_kernel#0               memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__index_hidden_rows_decode16.index_select_rows_kernel.raw#0           memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__index_select_rope_cache_decode1.index_select_rows_kernel#0          memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__index_select_rope_cache_decode1.index_select_rows_kernel.raw#0      memref.load 的 invariant 属性
+pipeline__Inputs__ttir-qwen3__softmax_attn_ctx1.softmax_kernel_inner#0                            index_cast 往返折叠
+pipeline__Inputs__ttir-qwen3__softmax_sampler_decode1.softmax_kernel_inner#0                      index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-qwen3__softmax_sampler_decode1.softmax_kernel_inner.raw#0                  index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-qwen3__softmax_sampler_decode16.softmax_kernel_inner#0                     index_cast 往返折叠；select(cmpi) ⇒ min/max
+pipeline__Inputs__ttir-qwen3__softmax_sampler_decode16.softmax_kernel_inner.raw#0                 index_cast 往返折叠；select(cmpi) ⇒ min/max

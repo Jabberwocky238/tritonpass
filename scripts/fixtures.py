@@ -5,21 +5,30 @@
 跑一遍，按 `-split-input-file` 逐块印通用形式；跑不过的块写空（测试里 tritonpass 也该失败）。参照里 pass 叫 `dope-*`，
 tritonpass 里叫 `triton-*`，`.args` 写的是 tritonpass 的名字。
 
-两组：
+三组：
   lit：参照仓 test/Pass 里通用 pass 的用例与 test/Conversion 全部（每条 RUN 行一份）
   pipeline：参照仓 test 下全部 .ttir 过整条通用流水线 [`PIPELINE`]
+  regress：本仓 tests/regress 下的回归用例，写法同 lit（`// RUN: dope-opt %s <参数>`，参数用参照的名字），每条 RUN 行一份
 
-    python3 -I scripts/fixtures.py --ref <dope-opt 可执行文件> --tests <dope-opt 的 test 目录>
+    python3 -I scripts/fixtures.py --ref <dope-opt 可执行文件> --tests <dope-opt 的 test 目录>   # 三组全部重新生成
+    python3 -I scripts/fixtures.py --ref <dope-opt 可执行文件> --only regress                    # 只重新生成回归用例
+    python3 -I scripts/fixtures.py --ref <dope-opt 可执行文件> --only regress --check            # 只比对，不写
+
+只重新生成某几组时，别的组的夹具原样留着。
 """
 import argparse
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures"
+REGRESS = ROOT / "tests" / "regress"
+
+GROUPS = ("lit", "pipeline", "regress")
 
 # 参照里的名字 ⇒ tritonpass 的名字（只列改了名的；triton-to-structured 等原样）
 RENAME = {f"dope-{n}": f"triton-{n}" for n in (
@@ -104,38 +113,42 @@ def runs(path):
     return text, cmds
 
 
+def from_file(ref, path, base, gpu_variant):
+    """一个 lit 写法的文件：每条调参照的 RUN 行一份 `<base>.<k>`。`gpu_variant`：triton-arith-to-linalg 的用例另加一份 gpu 写法。"""
+    text, cmds = runs(path)
+    parts = split_file(text) if "split-file" in text else {}
+    k = 0
+    for cmd in cmds:
+        seg = cmd.split("|")[0]
+        if "dope-opt" not in seg or "%expect_rc" in seg or "dope-triton-to-std" in seg or "verify-diagnostics" in seg:
+            continue
+        toks = shlex.split(seg)
+        toks = toks[toks.index("dope-opt") + 1:]
+        src, args = None, []
+        for t in toks:
+            if t == "%s":
+                src = text
+            elif t.startswith("%t/"):
+                src = parts[t[3:]]
+            elif t == "-o":
+                break
+            else:
+                args.append(t)
+        if src is None:
+            continue
+        yield f"{base}.{k}", [rename(a) for a in args], src, reference(ref, args, src)
+        k += 1
+        if gpu_variant and "--triton-arith-to-linalg" in args:
+            # 同一条 RUN 换成 gpu 写法再来一份：缺省的 args 写法与 gpu 写法都有对拍
+            gpu = [f"--triton-arith-to-linalg={GPU_REF}" if a == "--triton-arith-to-linalg" else a for a in args]
+            yield f"{base}.{k}", [rename(a) for a in gpu], src, reference(ref, gpu, src)
+            k += 1
+
+
 def lit(ref, tests):
     files = [tests / "Pass" / f"{n}.mlir" for n in LIT_PASS] + sorted((tests / "Conversion").rglob("*.mlir"))
     for path in files:
-        text, cmds = runs(path)
-        parts = split_file(text) if "split-file" in text else {}
-        k = 0
-        for cmd in cmds:
-            seg = cmd.split("|")[0]
-            if "dope-opt" not in seg or "%expect_rc" in seg or "dope-triton-to-std" in seg or "verify-diagnostics" in seg:
-                continue
-            toks = shlex.split(seg)
-            toks = toks[toks.index("dope-opt") + 1:]
-            src, args = None, []
-            for t in toks:
-                if t == "%s":
-                    src = text
-                elif t.startswith("%t/"):
-                    src = parts[t[3:]]
-                elif t == "-o":
-                    break
-                else:
-                    args.append(t)
-            if src is None:
-                continue
-            base = "__".join(path.relative_to(tests).with_suffix("").parts)
-            yield f"{base}.{k}", [rename(a) for a in args], src, reference(ref, args, src)
-            k += 1
-            if "--triton-arith-to-linalg" in args:
-                # 同一条 RUN 换成 gpu 写法再来一份：缺省的 args 写法与 gpu 写法都有对拍
-                gpu = [f"--triton-arith-to-linalg={GPU_REF}" if a == "--triton-arith-to-linalg" else a for a in args]
-                yield f"{base}.{k}", [rename(a) for a in gpu], src, reference(ref, gpu, src)
-                k += 1
+        yield from from_file(ref, path, "__".join(path.relative_to(tests).with_suffix("").parts), gpu_variant=True)
 
 
 def pipeline(ref, tests):
@@ -146,22 +159,66 @@ def pipeline(ref, tests):
         yield stem, [rename(a) for a in args], src, reference(ref, args, src)
 
 
+def regress(ref):
+    """tests/regress 下的回归用例：stem 是 `regress__<相对路径，目录间用 __>.<k>`。"""
+    for path in sorted(REGRESS.rglob("*.mlir")):
+        yield from from_file(ref, path, "regress__" + "__".join(path.relative_to(REGRESS).with_suffix("").parts), gpu_variant=False)
+
+
+def group_of(stem):
+    if stem.startswith("pipeline__"):
+        return "pipeline"
+    if stem.startswith("regress__"):
+        return "regress"
+    return "lit"
+
+
+def stem_of(path):
+    for suffix in (".args", ".in.mlir", ".generic.mlir"):
+        if path.name.endswith(suffix):
+            return path.name[: -len(suffix)]
+    return None
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", required=True)
-    ap.add_argument("--tests", required=True)
+    ap = argparse.ArgumentParser(description="用参照（dope-opt）生成 tests/fixtures")
+    ap.add_argument("--ref", required=True, help="dope-opt 可执行文件")
+    ap.add_argument("--tests", help="dope-opt 的 test 目录（lit、pipeline 两组要）")
+    ap.add_argument("--only", action="append", choices=GROUPS, help="只处理这一组（可重复给；缺省三组都处理）")
+    ap.add_argument("--check", action="store_true", help="只比对现有的夹具，不写；有出入时退出码 1")
     o = ap.parse_args()
+    only = set(o.only or GROUPS)
+    if only & {"lit", "pipeline"} and not o.tests:
+        ap.error("lit、pipeline 两组要给 --tests")
+    gens = []
+    if "lit" in only:
+        gens.append(lit(o.ref, Path(o.tests)))
+    if "pipeline" in only:
+        gens.append(pipeline(o.ref, Path(o.tests)))
+    if "regress" in only:
+        gens.append(regress(o.ref))
+    want = {}
+    for gen in gens:
+        for stem, args, src, expect in gen:
+            assert f"{stem}.args" not in want, f"stem 重复：{stem}"
+            want[f"{stem}.args"] = "".join(a + "\n" for a in args)
+            want[f"{stem}.in.mlir"] = src
+            want[f"{stem}.generic.mlir"] = expect
     OUT.mkdir(parents=True, exist_ok=True)
-    for old in OUT.iterdir():
-        old.unlink()
-    n = 0
-    for gen in (lit, pipeline):
-        for stem, args, src, expect in gen(o.ref, Path(o.tests)):
-            (OUT / f"{stem}.args").write_text("".join(a + "\n" for a in args))
-            (OUT / f"{stem}.in.mlir").write_text(src)
-            (OUT / f"{stem}.generic.mlir").write_text(expect)
-            n += 1
-    print(f"{n} runs")
+    have = {p.name: p for p in OUT.iterdir() if stem_of(p) is not None and group_of(stem_of(p)) in only}
+    if o.check:
+        bad = sorted([f"多出来：{n}" for n in have if n not in want]
+                     + [f"缺少：{n}" for n in want if n not in have]
+                     + [f"不同：{n}" for n in want if n in have and have[n].read_text() != want[n]])
+        for b in bad:
+            print(b)
+        print(f"{len(want) // 3} runs，{len(bad)} 处出入")
+        sys.exit(1 if bad else 0)
+    for p in have.values():
+        p.unlink()
+    for name, text in want.items():
+        (OUT / name).write_text(text)
+    print(f"{len(want) // 3} runs")
 
 
 if __name__ == "__main__":
