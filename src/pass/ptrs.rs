@@ -1,7 +1,7 @@
 //! 指针的两个改写：`triton-lower-bool-ptr`（`BoolPtr.cpp`）与 `triton-scalar-ptr`（`ScalarPtr.cpp`）。
 //!
-//! - lower-bool-ptr：bool 缓冲按 i8 交出。所有 `!tt.ptr<i1>`（标量指针与指针张量的元素）换成 `!tt.ptr<i8>`（入口参数、
-//!   函数类型、各 op 的结果），i1 到 i8 的 tt.bitcast 随之成了恒等、去掉。P0 已经保证 i1 指针只经 tt.bitcast 使用。
+//! - lower-bool-ptr：bool 缓冲按 i8 交出。所有 `!tt.ptr<i1>`（标量指针与指针张量的元素）换成 `!tt.ptr<i8>`（函数类型的参数与
+//!   结果、所有块的块参数、各 op 的结果），i1 到 i8 的 tt.bitcast 随之成了恒等、去掉。P0 已经保证 i1 指针只经 tt.bitcast 使用。
 //! - scalar-ptr：入口指针加一串标量 tt.addptr 偏移的标量写（无 mask）直接落成 1 个元素的结构化写（`tts.make_tptr` 加
 //!   `tts.store`）——P2 只登记经过 tt.addptr 的指针，裸指针的写会一路留到 P6。只转写、只转无 mask 的、只转根是入口指针参数的。
 use mlirformat::{Attribute, Error, FunctionType, Type};
@@ -10,7 +10,8 @@ use mlirpass::{Body, Def, OpData, OpId, PatternSet, Rewriter, ValueId, pass, pat
 use crate::ir::{Ofr, TtBuilder, dense_i64};
 use crate::{Ir, Kind, pointee};
 
-/// bool 缓冲按 i8 交出：以 `tt.func` 为根，整个函数一次改完（入口参数、函数类型、各 op 的结果，再去掉成了恒等的 tt.bitcast）。
+/// bool 缓冲按 i8 交出：以 `tt.func` 为根，整个函数一次改完（函数类型的参数与结果、每个块的块参数、各 op 的结果，再去掉成了恒等的
+/// tt.bitcast）。
 pub struct LowerBoolPtrRules;
 
 #[patterns]
@@ -18,20 +19,25 @@ impl LowerBoolPtrRules {
     #[rewrite("tt.func")]
     fn bool_ptr_to_i8(rw: &mut Rewriter<'_, '_>, f: OpId) -> bool {
         let Some(Attribute::Type(Type::Function(ft))) = rw.body[f].get("function_type").cloned() else { return false };
-        let mut inputs = ft.inputs.clone();
-        let mut changed = false;
-        for (i, t) in ft.inputs.iter().enumerate() {
-            if let Some(u) = BoolPtr::to_i8(t) {
-                inputs[i] = u.clone();
-                changed = true;
-                if !rw.body[rw.body[f].regions[0]].blocks.is_empty() {
-                    let a = rw.body[rw.body.entry(f, 0)].args[i];
-                    rw.body[a].ty = u;
-                }
+        let (inputs, results) = (BoolPtr::all_to_i8(&ft.inputs), BoolPtr::all_to_i8(&ft.results));
+        let mut changed = inputs != ft.inputs || results != ft.results;
+        if changed {
+            rw.modify(f, |b| b[f].set("function_type", Attribute::Type(Type::Function(Box::new(FunctionType { inputs, results })))));
+        }
+        // 块参数不只入口块的：非入口块、scf.for / scf.while 体的块参数（循环里前移的 bool 指针）也要换，不然与初值、yield 的类型对不上
+        let mut blocks = Vec::new();
+        for o in rw.body.ops_in(f) {
+            for &r in &rw.body[o].regions {
+                blocks.extend(rw.body.blocks(r));
             }
         }
-        if changed {
-            rw.modify(f, |b| b[f].set("function_type", Attribute::Type(Type::Function(Box::new(FunctionType { inputs, results: ft.results.clone() })))));
+        for blk in blocks {
+            for a in rw.body[blk].args.clone() {
+                if let Some(u) = BoolPtr::to_i8(rw.body.ty(a)) {
+                    rw.body[a].ty = u;
+                    changed = true;
+                }
+            }
         }
         for o in rw.body.ops_in(f) {
             for r in rw.body[o].results.clone() {
@@ -43,7 +49,7 @@ impl LowerBoolPtrRules {
         }
         let casts: Vec<OpId> = rw.body.ops_in(f).into_iter().filter(|o| rw.body.is(*o, Kind::TtBitcast)).collect();
         for c in casts {
-            if rw.body.ty(rw.body.opd(c, 0)) == rw.body.ty(rw.body.res(c, 0)) {
+            if BoolPtr::canonical(rw.body.ty(rw.body.opd(c, 0))) == BoolPtr::canonical(rw.body.ty(rw.body.res(c, 0))) {
                 let src = rw.body.opd(c, 0);
                 rw.replace_op(c, &[src]);
                 changed = true;
@@ -71,14 +77,41 @@ impl BoolPtr {
         if x.name != "tt.ptr" || !matches!(pointee(e), Type::Integer { width: 1, .. }) {
             return None;
         }
-        // `!tt.ptr<i1>` / `!tt.ptr<i1, 地址空间>`：换掉第一个参数
+        // `!tt.ptr<i1>` / `!tt.ptr<i1, 地址空间>`：换掉第一个参数；缺省的地址空间 1 不写出来（同 Triton 的 PointerType 的印法），
+        // 换出来的才与写成 `!tt.ptr<i8>` 的类型相同
         let body = x.body.as_deref().unwrap_or("<i1>");
-        let new_body = body.replacen("i1", "i8", 1);
-        let ptr = Type::Extended(Box::new(mlirformat::Extended { name: x.name.clone(), body: Some(new_body.into()), params: Vec::new() }));
+        let ptr = Type::Extended(Box::new(mlirformat::Extended { name: x.name.clone(), body: Some(Self::without_default_space(&body.replacen("i1", "i8", 1)).into()), params: Vec::new() }));
         Some(match t {
             Type::Shaped(_) => t.with_element(ptr),
             _ => ptr,
         })
+    }
+
+    /// 一组类型逐个 [`to_i8`](Self::to_i8)（不是 bool 指针的原样）。
+    fn all_to_i8<'a>(ts: &[Type<'a>]) -> Vec<Type<'a>> {
+        ts.iter().map(|t| Self::to_i8(t).unwrap_or_else(|| t.clone())).collect()
+    }
+
+    /// `!tt.ptr` 的写法 `<T, 1>` ⇒ `<T>`：地址空间 1 是缺省，两种写法是同一个类型；别的写法原样。
+    fn without_default_space(body: &str) -> String {
+        match body.trim().strip_suffix('>').and_then(|b| b.rsplit_once(',')) {
+            Some((head, space)) if space.trim() == "1" => format!("{head}>"),
+            _ => body.to_owned(),
+        }
+    }
+
+    /// 比较用：`!tt.ptr<T, 1>` 与 `!tt.ptr<T>` 写法不同、类型相同（指针张量看元素）。
+    fn canonical<'a>(t: &Type<'a>) -> Type<'a> {
+        let Type::Extended(x) = t.element_type() else { return t.clone() };
+        if x.name != "tt.ptr" {
+            return t.clone();
+        }
+        let Some(body) = x.body.as_deref() else { return t.clone() };
+        let ptr = Type::Extended(Box::new(mlirformat::Extended { name: x.name.clone(), body: Some(Self::without_default_space(body).into()), params: x.params.clone() }));
+        match t {
+            Type::Shaped(_) => t.with_element(ptr),
+            _ => ptr,
+        }
     }
 }
 

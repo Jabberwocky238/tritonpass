@@ -1,0 +1,6 @@
+# 规范化 pass（dope-* 的移植）上 tritonpass 有意与参照不同的块：参照自己的毛病（断言失败、过不了它自己的校验、算出错的值），
+# tritonpass 是对的。一行一块：`<stem>#<块号>  <原因>`。
+
+regress__norm__bool_ptr.0#0      参照只换入口块参数与 op 结果，scf.for 体的块参数留着 ptr<i1>，过不了它自己的校验（tt.addptr 的结果与指针类型不符）
+regress__norm__bool_ptr.0#1      参照不换 scf.while 体与非入口块的块参数，留着 ptr<i1>，过不了它自己的校验
+regress__norm__bool_ptr.0#2      参照不换函数类型的结果，tt.return 的 ptr<i8> 与函数结果 ptr<i1> 不符，过不了它自己的校验
