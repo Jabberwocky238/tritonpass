@@ -8,3 +8,4 @@ regress__norm__iota_term_length.0#0      参照把同一根轴上长 1 与长 8 
 regress__norm__iota_term_length.0#1      参照只把长 1 的项加到长 8 那项的第一位，折出错的向量 [3, 1, 2, …, 7]（应是 [3, 4, …, 10]）；tritonpass 认不出、不改
 regress__norm__iota_overflow.0#0         参照在 int64 里回绕着算（INT64_MIN / -1 也照除），折出错的常量 -4.6e18；按 i32 的语义每格都是 0。tritonpass 溢出即认不出、不改
 regress__norm__iota_overflow.0#1         参照在 int64 里回绕着算，折出错的常量 4.6e18；按 i32 的语义每格都是 0。tritonpass 溢出即认不出、不改
+regress__norm__split_row_narrow_scalar.0#0    参照把 i16 的行常量直接与 i64 的因子相乘，造出 arith.muli (i16, i64) -> i16，过不了它自己的校验；tritonpass 认不出、整条回滚不改

@@ -515,10 +515,11 @@ impl Split {
         let mut row_offset: Option<ValueId> = None;
         for leaf in rows {
             let Some(sym) = s.eval(leaf, 0) else { return false };
+            let part = s.rebuild_row_offset(&sym, &row_shape);
+            // 标量不是 i32 / i64（如 i16 的行常量）在重建里的 to_i64 才查出来：每片重建完就查，最后一片也不漏，认不出就整条回滚
             if s.failed {
                 return false;
             }
-            let part = s.rebuild_row_offset(&sym, &row_shape);
             row_offset = Some(match row_offset {
                 Some(r) => s.c.binary(Kind::ArithAddi, r, part),
                 None => part,
