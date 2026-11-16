@@ -4,12 +4,13 @@
 //! subview + `linalg.copy` + `bufferization.to_tensor`，`tts.store` ⇒ subview + `bufferization.materialize_in_destination`；
 //! 写法 G 的标量 `tts.gather` ⇒ `memref.load`；`tts.make_gather_scatter_tptr` 的读写按行拆成循环（`LoadConverter::rewriteGather`、
 //! `StoreConverter::rewriteScatter`）。
+use core::num::TryFromIntError;
 use std::collections::BTreeSet;
 
 use mlirformat::{Attribute, Dim, Error, Shaped, ShapedKind, StridedLayout, Type};
 use mlirpass::{Body, ConversionConfig, ConversionPattern, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, MemrefLayout, Mode, OpData, OpId, Rewriter, TypeConverter, ValueId, pass, patterns};
 
-use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values};
+use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values, len_i64};
 use crate::pass::ofr::{Ofr, OfrBuilder};
 use crate::pass::window::{StrideKind, Tptr, UNBOUNDED, Window};
 use crate::{Ir, Kind, pointee};
@@ -116,7 +117,7 @@ impl Mem {
         let mut seg = vec![1i64];
         for l in lists {
             let d: Vec<ValueId> = l.iter().filter_map(|o| o.value()).collect();
-            seg.push(d.len() as i64);
+            seg.push(len_i64(d.len()));
             operands.extend(d);
         }
         let st = |l: &[Ofr]| dense_i64(&l.iter().map(|o| o.static_value()).collect::<Vec<_>>());
@@ -157,7 +158,7 @@ struct WithTc;
 impl WithTc {
     #[convert("tts.make_tptr")]
     fn make_tptr(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let t = Tptr::of(cr.rw.body, op);
+        let Some(t) = Tptr::of(cr.rw.body, op) else { return false };
         // 0 维的没有窗口可建（C++ 取第 0 维时越界断言）：报错，转换失败
         if t.sizes.is_empty() {
             cr.rw.body.emit_error(op, "tts.make_tptr 是 0 维的：结构化指针至少要有一维才建得出视图");
@@ -239,18 +240,19 @@ impl NoTc {
     fn load(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>], written: &BTreeSet<ValueId>) -> bool {
         let b = &*cr.rw.body;
         if let Some(gs) = b.def_of(b.opd(op, 0), Kind::TtsMakeGatherScatterTptr) {
-            return GatherScatter::of(b, gs).load(cr, op, o[0][0]);
+            let Some(g) = GatherScatter::of(b, gs) else { return false };
+            return g.load(cr, op, o[0][0]);
         }
         let Some(make) = b.def_of(b.opd(op, 0), Kind::TtsMakeTptr) else { return false };
         if !Window::check(b, make, written.contains(&b.opd(make, 0)), &mut Vec::new()) {
             return false;
         }
-        let t = Tptr::of(b, make);
+        let Some(t) = Tptr::of(b, make) else { return false };
         let Ok(plan) = Window::plan(b, &t) else { return false };
         let tt = b.ty(b.res(op, 0)).clone();
         let shape = tt.dims().unwrap_or_default();
         let elem = tt.element_type().clone();
-        let mask = Self::mask(b, op, true);
+        let Ok(mask) = Self::mask(b, op, true) else { return false };
         let other = Self::other(b, op);
         let root = o[0][0];
         let offsets = Mem::offsets(cr, op, &plan);
@@ -287,18 +289,19 @@ impl NoTc {
     fn store(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
         if let Some(gs) = b.def_of(b.opd(op, 0), Kind::TtsMakeGatherScatterTptr) {
-            return GatherScatter::of(b, gs).store(cr, op, o[0][0], o[1][0]);
+            let Some(g) = GatherScatter::of(b, gs) else { return false };
+            return g.store(cr, op, o[0][0], o[1][0]);
         }
         let Some(make) = b.def_of(b.opd(op, 0), Kind::TtsMakeTptr) else { return false };
         if !Window::check(b, make, true, &mut Vec::new()) {
             return false;
         }
-        let t = Tptr::of(b, make);
+        let Some(t) = Tptr::of(b, make) else { return false };
         let Ok(plan) = Window::plan(b, &t) else { return false };
         let value = b.opd(op, 1);
         let vt = b.ty(value).clone();
         let shape = vt.dims().unwrap_or_default();
-        let mask = Self::mask(b, op, false);
+        let Ok(mask) = Self::mask(b, op, false) else { return false };
         let root = o[0][0];
         let offsets = Mem::offsets(cr, op, &plan);
         let (dims, full) = Self::dims(cr.rw.body, mask, &shape);
@@ -318,19 +321,21 @@ impl NoTc {
 }
 
 impl NoTc {
-    fn mask(b: &Body<'_>, op: OpId, load: bool) -> Option<Vec<Ofr>> {
+    /// 读写的 mask 各维：没有 mask 是 `Ok(None)`；段长（operandSegmentSizes）是负数时读不出，是 `Err`。
+    fn mask(b: &Body<'_>, op: OpId, load: bool) -> Result<Option<Vec<Ofr>>, TryFromIntError> {
         let n = dense_values(b[op].get("static_mask_dims")).len();
         if n == 0 {
-            return None;
+            return Ok(None);
         }
         let ops = &b[op].operands;
         let dynv = if load {
             let seg = dense_values(b[op].get("operandSegmentSizes"));
-            &ops[1..1 + seg.get(1).copied().unwrap_or(0) as usize]
+            let nd = usize::try_from(seg.get(1).copied().unwrap_or(0))?;
+            &ops[1..1 + nd]
         } else {
             &ops[2..]
         };
-        Some(Tptr::mixed(b, op, "static_mask_dims", dynv))
+        Ok(Some(Tptr::mixed(b, op, "static_mask_dims", dynv)))
     }
 
     fn other(b: &Body<'_>, op: OpId) -> Option<ValueId> {
@@ -372,15 +377,17 @@ struct GatherScatter {
 }
 
 impl GatherScatter {
-    fn of(b: &Body<'_>, op: OpId) -> Self {
+    /// 段长或 gather_scatter_dim 是负数时认不出（`None`）。
+    fn of(b: &Body<'_>, op: OpId) -> Option<Self> {
         let seg = dense_values(b[op].get("operandSegmentSizes"));
         let ops = &b[op].operands;
-        let n = |i: usize| seg.get(i).copied().unwrap_or(0) as usize;
-        let (ns, no) = (n(2), n(3));
+        let n = |i: usize| usize::try_from(seg.get(i).copied().unwrap_or(0)).ok();
+        let (ns, no) = (n(2)?, n(3)?);
         let strides = Tptr::mixed(b, op, "static_strides", &ops[2..2 + ns]);
         let offsets = Tptr::mixed(b, op, "static_offsets", &ops[2 + ns..2 + ns + no]);
-        let mask = (n(4) > 0).then(|| ops[2 + ns + no]);
-        Self { offset: ops[1], mask, dim: b.int_attr(op, "gather_scatter_dim").unwrap_or(0) as usize, sizes: dense_values(b[op].get("sizes")), strides, offsets, result: b.ty(b.res(op, 0)).owned() }
+        let mask = (n(4)? > 0).then(|| ops[2 + ns + no]);
+        let dim = usize::try_from(b.int_attr(op, "gather_scatter_dim").unwrap_or(0)).ok()?;
+        Some(Self { offset: ops[1], mask, dim, sizes: dense_values(b[op].get("sizes")), strides, offsets, result: b.ty(b.res(op, 0)).owned() })
     }
 
     /// `getMixedStridesForMemref`：尺寸为 1、行距为静态 0 的维换成累乘的尺寸（从最内一维往外）；行距是值的经
@@ -482,7 +489,7 @@ impl GatherScatter {
         let rt = b.ty(b.res(op, 0)).clone();
         let shape = rt.dims().unwrap_or_default();
         let elem = rt.element_type().clone();
-        let mask = NoTc::mask(b, op, true);
+        let Ok(mask) = NoTc::mask(b, op, true) else { return false };
         let other = NoTc::other(b, op);
         let atype = Mem::memref(&shape, elem, None);
         let offset = self.index_offsets(cr);
@@ -514,7 +521,7 @@ impl GatherScatter {
 
     /// `StoreConverter::rewriteScatter`。
     fn store(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, memref: ValueId, value: ValueId) -> bool {
-        let mask = NoTc::mask(cr.rw.body, op, false);
+        let Ok(mask) = NoTc::mask(cr.rw.body, op, false) else { return false };
         let offset = self.index_offsets(cr);
         let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.clone());
         let _ = l;

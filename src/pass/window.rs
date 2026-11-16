@@ -42,19 +42,20 @@ pub struct Tptr {
 }
 
 impl Tptr {
-    pub fn of(b: &Body<'_>, op: OpId) -> Self {
+    /// 读一个 tts.make_tptr；段长（operandSegmentSizes）是负数时认不出（`None`）。
+    pub fn of(b: &Body<'_>, op: OpId) -> Option<Self> {
         let seg = dense_values(b[op].get("operandSegmentSizes"));
         let ops = &b[op].operands;
-        let n = |i: usize| seg.get(i).copied().unwrap_or(0) as usize;
-        let (s, o, sh) = (n(1), n(2), n(3));
-        Self {
+        let n = |i: usize| usize::try_from(seg.get(i).copied().unwrap_or(0)).ok();
+        let (s, o, sh) = (n(1)?, n(2)?, n(3)?);
+        Some(Self {
             base: b.opd(op, 0),
             sizes: dense_values(b[op].get("sizes")),
             strides: Self::mixed(b, op, "static_strides", &ops[1..1 + s]),
             offsets: Self::mixed(b, op, "static_offsets", &ops[1 + s..1 + s + o]),
             shape: Self::mixed(b, op, "static_shape", &ops[1 + s + o..1 + s + o + sh]),
             order: dense_values(b[op].get("order")),
-        }
+        })
     }
 
     /// 静态数组 `name` 与动态操作数拼成 mixed 列表（`getMixedValues`）。
@@ -290,7 +291,10 @@ impl Window {
 
     /// 预检：问题按出现次序记进 `found`，返回能不能成窗口。
     pub fn check(b: &Body<'_>, op: OpId, write: bool, found: &mut Vec<WindowIssue>) -> bool {
-        let t = Tptr::of(b, op);
+        let Some(t) = Tptr::of(b, op) else {
+            found.push(WindowIssue::Form("tts.make_tptr 的段长（operandSegmentSizes）是负数，读不出各段"));
+            return false;
+        };
         let plan = Self::plan(b, &t);
         let mut ok = true;
         if t.is_structured_ptr() {

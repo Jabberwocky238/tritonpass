@@ -74,7 +74,7 @@ impl Squeeze<'_> {
     const KEEP: &'static str = "dope.keep_unit_dims";
 
     fn window(b: &Body<'_>, a: OpId) -> Option<(OpId, Tptr)> {
-        b.def_of(b.opd(a, 0), Kind::TtsMakeTptr).map(|m| (m, Tptr::of(b, m)))
+        b.def_of(b.opd(a, 0), Kind::TtsMakeTptr).and_then(|m| Tptr::of(b, m).map(|t| (m, t)))
     }
 
     /// 改写一次读写；窗口用完就擦掉。

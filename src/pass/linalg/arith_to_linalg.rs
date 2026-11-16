@@ -11,7 +11,7 @@ use mlirpass::{
     Action, Body, ConversionConfig, ConversionPattern, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, GreedyConfig, Mode, OpData, OpId, PatternSet, Rewriter, Run, Trait, ValueId, pass, patterns,
 };
 
-use crate::ir::{dense_i64, dense_values, i64_attr};
+use crate::ir::{dense_i64, dense_values, i64_attr, len_i64};
 use crate::{Build, Ir, Kind};
 
 type Cr<'r, 'a, 'p> = ConversionRewriter<'r, 'a, 'p>;
@@ -250,11 +250,12 @@ impl Tt {
         let (st, rt) = (L::ty(cr, src), L::rty(cr, op));
         let (sd, rd) = (L::dims(&st), L::dims(&rt));
         let diff = rd.len() - sd.len();
-        let results = (diff..rd.len()).map(|i| if sd[i - diff] == 1 { AffineExpr::Const(0) } else { AffineExpr::Dim(i as u32) }).collect();
-        let maps = [AffineMap { dims: rd.len() as u32, syms: 0, results }, AffineMap::identity(rd.len() as u32)];
+        let Ok(rank) = u32::try_from(rd.len()) else { return false };
+        let results = (0..rank).skip(diff).zip(&sd).map(|(i, s)| if *s == 1 { AffineExpr::Const(0) } else { AffineExpr::Dim(i) }).collect();
+        let maps = [AffineMap { dims: rank, syms: 0, results }, AffineMap::identity(rank)];
         let init = cr.empty(&rd, rt.element_type().clone(), &[]);
         let g = cr.generic(&[rt.clone()], &[src], &[init], &maps, &L::par(rd.len()), &mut |_, a| vec![a[0]]);
-        let bdims: Vec<i64> = (0..sd.len()).filter(|i| rd[*i] != sd[*i]).map(|i| i as i64).collect();
+        let bdims: Vec<i64> = (0..sd.len()).filter(|i| rd[*i] != sd[*i]).map(len_i64).collect();
         cr.rw.body[g].set("broadcastDims", dense_i64(&bdims));
         let gv = cr.rw.body[g].results[0];
         cr.replace_values(op, &[gv]);
@@ -264,8 +265,8 @@ impl Tt {
     #[convert("tt.expand_dims")]
     fn expand_dims(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let src = o[0][0];
-        let rank = L::dims(&L::ty(cr, src)).len() as i64;
-        let axis = cr.rw.body.int_attr(op, "axis").unwrap_or(0) as i64;
+        let rank = len_i64(L::dims(&L::ty(cr, src)).len());
+        let Ok(axis) = i64::try_from(cr.rw.body.int_attr(op, "axis").unwrap_or(0)) else { return false };
         let mut groups = Vec::new();
         let mut c = 0i64;
         for i in 0..rank {
@@ -291,13 +292,14 @@ impl Tt {
         let order = dense_values(cr.rw.body[op].get("order"));
         let rank = sd.len();
         let (perm, shape): (Vec<i64>, Vec<i64>) = if order.is_empty() {
-            let mut p: Vec<i64> = (0..rank as i64).collect();
+            let mut p: Vec<i64> = (0..len_i64(rank)).collect();
             p.swap(rank - 1, rank - 2);
             let mut sh = sd.clone();
             sh.swap(rank - 1, rank - 2);
             (p, sh)
         } else {
-            (order.clone(), order.iter().map(|i| sd[*i as usize]).collect())
+            let Some(sh) = order.iter().map(|i| usize::try_from(*i).ok().and_then(|i| sd.get(i).copied())).collect::<Option<Vec<_>>>() else { return false };
+            (order.clone(), sh)
         };
         let et = st.element_type().clone();
         let init = cr.empty(&shape, et.clone(), &[]);
@@ -473,7 +475,7 @@ impl Tt {
         let st = L::ty(cr, src);
         let et = st.element_type().clone();
         let rt = L::rty(cr, op);
-        let axis = cr.rw.body.int_attr(op, "axis").unwrap_or(0) as i64;
+        let Ok(axis) = i64::try_from(cr.rw.body.int_attr(op, "axis").unwrap_or(0)) else { return false };
         let vector = L::dims(&st).len() == 1;
         let f32_acc = Reduce::needs_f32(&et, rk);
         let ct = if f32_acc { Type::Float(mlirformat::FloatKind::F32) } else { et.clone() };
@@ -521,7 +523,7 @@ impl Tt {
             }
             Some(groups) => Self::expand(cr, src, &groups, ot),
             None => {
-                let st = Type::tensor(&[od.len() as i64], Type::int(64));
+                let st = Type::tensor(&[len_i64(od.len())], Type::int(64));
                 let shape: Attribute<'_> = mlirformat::Const { ty: st.clone(), values: od.iter().map(|x| crate::ir::integer(64, i128::from(*x))).collect(), elements: true }.into();
                 let k = cr.rw.create(OpData::build(Kind::ArithConstant.name()).with("value", shape), &[st]);
                 let kv = cr.rw.body[k].results[0];
@@ -545,7 +547,7 @@ impl Tt {
                 cr.rw.create(OpData::build(Kind::CfAssert.name()).operands(&[cond]).with("msg", msg), &[]);
             }
             t @ Type::Shaped(_) => {
-                let rank = L::dims(&t).len() as u32;
+                let Ok(rank) = u32::try_from(L::dims(&t).len()) else { return false };
                 cr.generic(&[], &[cond], &[], &[AffineMap::identity(rank)], &vec![true; rank as usize], &mut |cr, a| {
                     cr.rw.create(OpData::build(Kind::CfAssert.name()).operands(&[a[0]]).with("msg", msg.clone()), &[]);
                     Vec::new()
@@ -603,7 +605,7 @@ impl Tt {
             let mut offsets: Vec<mlirpass::MemrefOfr> = vec![mlirpass::MemrefOfr::C(0); shape.len()];
             let mut sizes: Vec<mlirpass::MemrefOfr> = shape.iter().map(|d| mlirpass::MemrefOfr::C(*d)).collect();
             let strides = vec![mlirpass::MemrefOfr::C(1); shape.len()];
-            *offsets.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(i as i64);
+            *offsets.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(len_i64(i));
             *sizes.last_mut().expect("rank ≥ 1") = mlirpass::MemrefOfr::C(1);
             let s = cr.rw.create(OpData::sliced(Kind::TensorInsertSlice.name(), &[*input, result], &[offsets, sizes, strides]), core::slice::from_ref(&rt));
             result = cr.rw.body[s].results[0];
@@ -759,7 +761,7 @@ impl Tt {
         }
         let (vsel_v, isel_v) = (res(vsel), res(isel));
         let (vt, it) = (b.ty(cv).clone(), b.ty(ci).clone());
-        let axis = b.int_attr(op, "axis").unwrap_or(0) as i64;
+        let Ok(axis) = i64::try_from(b.int_attr(op, "axis").unwrap_or(0)) else { return false };
         let result_ty = b.ty(b.res(op, 0)).clone();
         let scalar = !matches!(result_ty, Type::Shaped(_));
         let shape = if scalar { Vec::new() } else { L::dims(&result_ty) };
@@ -802,7 +804,7 @@ impl Tt {
         let inputs = b[op].operands.to_vec();
         let rts: Vec<Type<'_>> = b[op].results.iter().map(|r| b.ty(*r).clone()).collect();
         let shaped = rts.first().map_or_else(|| b.ty(*inputs.last().expect("有操作数")).clone(), Clone::clone);
-        let rank = L::dims(&shaped).len() as u32;
+        let Ok(rank) = u32::try_from(L::dims(&shaped).len()) else { return false };
         let maps = vec![AffineMap::identity(rank); inputs.len() + outputs.len().max(rts.len())];
         let ets: Vec<Type<'_>> = rts.iter().map(|t| t.element_type().clone()).collect();
         let (name, properties, attributes) = (b[op].name.clone(), b[op].properties.clone(), b[op].attributes.clone());
@@ -826,7 +828,7 @@ impl Tt {
     /// 网格参数：所在函数（`FunctionOpInterface`）的参数里从末尾数 `from_end` 个起、第 axis 个。
     fn grid_arg(cr: &mut Cr<'_, '_, '_>, op: OpId, from_end: usize) -> bool {
         let b = &*cr.rw.body;
-        let axis = b.int_attr(op, "axis").unwrap_or(0) as usize;
+        let Ok(axis) = usize::try_from(b.int_attr(op, "axis").unwrap_or(0)) else { return false };
         let mut at = b.parent_op(op);
         while let Some(p) = at.filter(|p| !matches!(b.kind(*p), Some(Kind::TtFunc | Kind::FuncFunc))) {
             at = b.parent_op(p);
@@ -839,8 +841,12 @@ impl Tt {
     }
 
     fn grid(cr: &mut Cr<'_, '_, '_>, op: OpId, k: Kind) -> bool {
-        let axis = cr.rw.body.int_attr(op, "axis").unwrap_or(0);
-        let dim = ["<dim x>", "<dim y>", "<dim z>"][axis.clamp(0, 2) as usize];
+        // 越界的 axis 取最近的一维（同 clamp 到 0..=2）
+        let dim = match cr.rw.body.int_attr(op, "axis").unwrap_or(0) {
+            ..=0 => "<dim x>",
+            1 => "<dim y>",
+            _ => "<dim z>",
+        };
         let g = cr.rw.create(OpData::build(k.name()).with("dimension", Attribute::dialect("gpu", dim)), &[Type::Index]);
         let gv = cr.rw.body[g].results[0];
         let v = cr.op1(Kind::ArithIndexCast.name(), &[gv], Type::int(32));
@@ -903,7 +909,7 @@ impl ConversionPattern for Elementwise {
         }
         let d = cr.rw.body[op].clone();
         let rts: Vec<Type<'_>> = d.results.iter().map(|r| L::ty(cr, *r)).collect();
-        let rank = L::dims(&rts[0]).len() as u32;
+        let Ok(rank) = u32::try_from(L::dims(&rts[0]).len()) else { return false };
         let id = AffineMap::identity(rank);
         let scalar = AffineMap { dims: rank, syms: 0, results: Vec::new() };
         let mut maps: Vec<AffineMap> = d.operands.iter().map(|v| if Self::scalar_like(&L::ty(cr, *v)) { scalar.clone() } else { id.clone() }).collect();
@@ -1073,13 +1079,13 @@ impl Reassoc {
             let target = dst[map.len()];
             while s < src.len() - 1 && prod * src[s] < target {
                 prod *= src[s];
-                cur.push(s as i64);
+                cur.push(len_i64(s));
                 s += 1;
             }
             if prod * src[s] != target {
                 return None;
             }
-            cur.push(s as i64);
+            cur.push(len_i64(s));
             s += 1;
             map.push(core::mem::take(&mut cur));
             prod = 1;
@@ -1091,7 +1097,7 @@ impl Reassoc {
             if src[d] != 1 {
                 return None;
             }
-            map.last_mut().expect("至少一组").push(d as i64);
+            map.last_mut().expect("至少一组").push(len_i64(d));
         }
         Some(map)
     }
