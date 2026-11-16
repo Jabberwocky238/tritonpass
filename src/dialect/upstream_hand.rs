@@ -19,11 +19,15 @@ impl Print for WhileOp<'_> {
     fn print(&self, p: &mut Printer<'_, '_>) -> fmt::Result {
         let Some(entry) = self.before.blocks.first().filter(|b| b.args.len() == self.inits.len()) else { return self.print_generic(p) };
         p.op_name(Self::NAME)?;
-        p.write_str(" (")?;
-        for (i, (a, v)) in entry.args.iter().zip(&self.inits).enumerate() {
-            write!(p, "{}%{} = {v}", if i > 0 { ", " } else { "" }, a.name)?;
+        // 初值表照 `printInitializationList`：没有初值（没有携带值的循环）整个不印，成 `scf.while : () -> () {`
+        if !self.inits.is_empty() {
+            p.write_str(" (")?;
+            for (i, (a, v)) in entry.args.iter().zip(&self.inits).enumerate() {
+                write!(p, "{}%{} = {v}", if i > 0 { ", " } else { "" }, a.name)?;
+            }
+            p.write_char(')')?;
         }
-        p.write_str(") : ")?;
+        p.write_str(" : ")?;
         p.write_char('(')?;
         for (i, t) in self.inits_ty.iter().enumerate() {
             write!(p, "{}{t}", if i > 0 { ", " } else { "" })?;
@@ -43,19 +47,23 @@ impl Print for WhileOp<'_> {
         p.region(&self.before, false)?;
         p.write_str(" do ")?;
         p.region(&self.after, true)?;
-        p.attr_dict(" attributes", &self.attrs, &[])?;
+        p.attr_dict("attributes ", &self.attrs, &[])?;
         p.loc(&self.loc)
     }
 }
 
 impl Parse for WhileOp<'_> {
     fn parse(p: &mut Parser<'_, '_>) -> R<Self> {
-        p.expect("(")?;
-        let pairs = p.list(")", |p| {
-            let name = p.sigil('%')?;
-            p.expect("=")?;
-            Ok((name, p.value()?))
-        })?;
+        // 初值表可以没有（`parseOptionalAssignmentList`）：`scf.while : () -> () { … } do { … }`
+        let pairs = if p.eat("(") {
+            p.list(")", |p| {
+                let name = p.sigil('%')?;
+                p.expect("=")?;
+                Ok((name, p.value()?))
+            })?
+        } else {
+            Vec::new()
+        };
         p.expect(":")?;
         let FunctionType { inputs, results } = p.fn_ty()?;
         if inputs.len() != pairs.len() {
