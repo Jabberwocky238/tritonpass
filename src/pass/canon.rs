@@ -1,6 +1,6 @@
 //! tt 方言的 op 接口（mlirpass 的 [`OpInterfaces`]）：上游的 `canonicalize` 经它认得 tt（与 MLIR 一样，一次贪心跑全部方言的折叠与模式）。
-//! - fold：Triton `Ops.cpp` 的 `SplatOp` / `MakeRangeOp` / `ExpandDimsOp` / `ReshapeOp` / `BroadcastOp` / `AddPtrOp` / `FpToFpOp` /
-//!   `TransOp::fold`；常量的物化照 `TritonDialect::materializeConstant`（`arith.constant`）；
+//! - fold：Triton `Ops.cpp` 的 `SplatOp` / `MakeRangeOp` / `ExpandDimsOp` / `ReshapeOp` / `BroadcastOp` / `AddPtrOp` / `AdvanceOp` /
+//!   `FpToFpOp` / `TransOp::fold`；常量的物化照 `TritonDialect::materializeConstant`（`arith.constant`）；
 //! - 规范化模式：`CanonicalizeMaskedLoadPattern`、`…StorePattern`、`BroadcastSplatPattern`、`BroadcastBroadcastPattern`、
 //!   `ReshapeOp::canonicalize`；
 //! - 内存效应：`tt.load` 读 GlobalMemory（volatile 另有写），没有用处的读是平凡死的；`tt.extern_elementwise`、
@@ -106,6 +106,8 @@ impl TtCanon {
             }
             // addptr(p, 0) ⇒ p
             Kind::TtAddptr => (b.const_int(b.opd(op, 1)) == Some(0)).then(|| Folded::Value(b.opd(op, 0))),
+            // `AdvanceOp::fold`：advance(ptr, 0, …, 0) ⇒ ptr（偏移全是常量 0）
+            Kind::TtAdvance => b[op].operands[1..].iter().all(|v| b.const_int(*v) == Some(0)).then(|| Folded::Value(b.opd(op, 0))),
             // fp_to_fp 到同类型 ⇒ 源；源是 ±0 ⇒ 同号的 0
             Kind::TtFpToFp => {
                 let src = b.opd(op, 0);
