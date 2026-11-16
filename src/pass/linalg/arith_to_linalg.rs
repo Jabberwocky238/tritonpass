@@ -1150,10 +1150,16 @@ impl TritonArithToLinalg {
     }
 
     /// `addProgramInfo`：函数类型与入口块末尾追加 6 个 i32（num_programs ×3，program_id ×3；块参数取函数的位置），
-    /// 有参数属性时补 6 个空的；`sys` 时这 6 个各带 `dope.sys`（后备写法 B′）。
-    fn add_program_info<'a>(b: &mut Body<'a>, f: OpId, sys: bool) {
+    /// 有参数属性时补 6 个空的；`sys` 时这 6 个各带 `dope.sys`（后备写法 B′）。只是声明、没有入口块的（C++ 的
+    /// `getBody().front()` 在这里断言）报错。
+    fn add_program_info<'a>(b: &mut Body<'a>, f: OpId, sys: bool) -> Result<(), Error> {
         const NAMES: [&str; 6] = ["num_programs_x", "num_programs_y", "num_programs_z", "program_id_x", "program_id_y", "program_id_z"];
-        let Some(Attribute::Type(Type::Function(ft))) = b[f].get("function_type").cloned() else { return };
+        let Some(Attribute::Type(Type::Function(ft))) = b[f].get("function_type").cloned() else { return Ok(()) };
+        let Some(entry) = b[f].regions.first().and_then(|r| b[*r].blocks.first().copied()) else {
+            let name = b[f].get("sym_name").and_then(|n| n.text().ok()).unwrap_or_default();
+            b.emit_error(f, format!("tt.func @{name} 只是声明，没有入口块：args 写法要在入口块末尾追加 6 个 grid 参数"));
+            return Err(Error::from("triton-arith-to-linalg：args 写法遇到没有函数体的 tt.func"));
+        };
         let first = ft.inputs.len();
         let mut inputs = ft.inputs.clone();
         inputs.extend(std::iter::repeat_n(Type::int(32), NAMES.len()));
@@ -1170,11 +1176,11 @@ impl TritonArithToLinalg {
             b[f].set("arg_attrs", Attribute::Array(xs));
         }
         let loc = b[f].loc.clone();
-        let entry = b.entry(f, 0);
         for _ in NAMES {
             let a = b.add_arg(entry, Type::int(32));
             b[a].loc.clone_from(&loc);
         }
+        Ok(())
     }
 
     /// tt.func ⇒ func.func，tt.return ⇒ func.return。照 C++（`moduleOp.walk`）整个 module 里的都换，嵌套 module 里的也算。
@@ -1243,7 +1249,7 @@ impl Run for TritonArithToLinalg {
             let top = body.top_block(op);
             let funcs: Vec<OpId> = body.block_ops(top).into_iter().filter(|f| body.is(*f, Kind::TtFunc)).collect();
             for f in funcs {
-                Self::add_program_info(body, f, self.dope_sys_attrs);
+                Self::add_program_info(body, f, self.dope_sys_attrs)?;
             }
         }
         patterns.add(Elementwise);
