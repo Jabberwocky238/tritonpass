@@ -1035,12 +1035,14 @@ impl Parse for MakeTensorDescOp<'_> {
             rest_ty.extend(g.iter().map(|_| int_ty(width)));
             rest.extend(g);
         }
-        let attrs = p.opt_dict()?;
+        let mut attrs = p.opt_dict()?;
+        // padding 是固有属性：attr-dict 里写着的（`{padding = 2 : i32}`）取出来，同 LoadOp 的 cache / evict；留在 attr-dict 里会印两遍
+        let padding = take_case(p, &mut attrs, "padding")?.unwrap_or(PaddingOption::Zero);
         p.expect(":")?;
         let base_ty = p.stripped_ty("tt.ptr")?;
         p.expect(",")?;
         let result = p.stripped_ty("tt.tensordesc")?;
-        let op = MakeTensorDescOp { base, rest, padding: Some(PaddingOption::Zero), base_ty, rest_ty, result, attrs, loc: p.opt_loc()? };
+        let op = MakeTensorDescOp { base, rest, padding: Some(padding), base_ty, rest_ty, result, attrs, loc: p.opt_loc()? };
         Self::owned(op, p)
     }
 }
