@@ -5,7 +5,7 @@
 //!   `ReshapeOp::canonicalize`；
 //! - 内存效应：`tt.load` 读 GlobalMemory（volatile 另有写），没有用处的读是平凡死的；`tt.extern_elementwise`、
 //!   `tt.elementwise_inline_asm` 是 pure 的没有效应、可推测执行，否则读写。
-use mlirformat::{Attribute, Const, Scalar, Type};
+use mlirformat::{Attribute, Const, Scalar, Signedness, Type};
 use mlirpass::{Body, EffectInstance, EffectKind, Fold, Folded, OpData, OpId, OpInterfaces, PatternSet, Rewriter, ValueId};
 
 use crate::ir::dense_values;
@@ -23,7 +23,7 @@ impl OpInterfaces for TtInterfaces {
         match b.kind(op)? {
             Kind::TtLoad => {
                 let mut e = vec![EffectInstance { kind: EffectKind::Read, value: Some(b.opd(op, 0)), resource: "GlobalMemory".into() }];
-                if matches!(b[op].get("isVolatile"), Some(Attribute::Bool(true))) {
+                if is_true(b[op].get("isVolatile")) {
                     e.push(EffectInstance::on(EffectKind::Write, None));
                 }
                 Some(e)
@@ -132,7 +132,16 @@ impl TtCanon {
 
 /// extern_elementwise / elementwise_inline_asm 的 `pure`。
 fn pure(b: &Body<'_>, op: OpId) -> bool {
-    matches!(b[op].get("pure"), Some(Attribute::Bool(true)))
+    is_true(b[op].get("pure"))
+}
+
+/// BoolAttr 的值。MLIR 的 BoolAttr 就是 i1 的 IntegerAttr，`true` 与 `1 : i1` 是同一个属性；mlirformat 照写法分开存，两种都要认。
+fn is_true(a: Option<&Attribute<'_>>) -> bool {
+    match a {
+        Some(Attribute::Bool(v)) => *v,
+        Some(i @ Attribute::Int { ty: Some(Type::Integer { signedness: Signedness::Signless, width: 1 }), .. }) => i.int().is_ok_and(|v| v != 0),
+        _ => false,
+    }
 }
 
 /// splat 常量 i1 掩码的值。
