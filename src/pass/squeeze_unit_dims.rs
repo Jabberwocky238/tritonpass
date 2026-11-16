@@ -7,7 +7,7 @@ use mlirpass::{Body, OpData, OpId, PatternSet, Rewriter, ValueId, pass, patterns
 
 use super::ofr::{Ofr, OfrBuilder};
 use super::window::{Tptr, Window};
-use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values, i64_attr};
+use crate::ir::{TtBuilder, dense_i32, dense_i64, dense_values, i64_attr, len_i64};
 use crate::{Ir, Kind};
 
 #[pass("triton-squeeze-unit-dims", on = "builtin.module", ty = SqueezeUnitDims)]
@@ -84,7 +84,9 @@ impl Squeeze<'_> {
         if drop.is_empty() || (split && Self::needs_carrier(rw.body, &t, &drop)) {
             return false;
         }
-        Squeeze { drop: &drop, t: &t }.rewrite(rw, a);
+        if !(Squeeze { drop: &drop, t: &t }).rewrite(rw, a) {
+            return false;
+        }
         if rw.body[rw.body.res(make, 0)].uses.is_empty() {
             rw.erase_op(make);
         }
@@ -147,7 +149,7 @@ impl Squeeze<'_> {
             if !dropped && kept {
                 groups.push(Attribute::Array(core::mem::take(&mut cur)));
             }
-            cur.push(i64_attr(d as i64));
+            cur.push(i64_attr(len_i64(d)));
             kept |= !dropped;
         }
         groups.push(Attribute::Array(cur));
@@ -162,7 +164,8 @@ impl Squeeze<'_> {
         (dims.iter().filter_map(|d| d.value()).collect(), dims.iter().map(|d| d.static_value()).collect())
     }
 
-    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) {
+    /// 改写一条读写；mask 的段长是负数（认不出）时不动它，返回 false。
+    fn rewrite(&self, rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
         let b = &*rw.body;
         let t = self.t;
         let load = b.is(op, Kind::TtsLoad);
@@ -170,7 +173,7 @@ impl Squeeze<'_> {
         let ops = b[op].operands.clone();
         let (mask, other) = if load {
             let seg = dense_values(b[op].get("operandSegmentSizes"));
-            let nd = seg.get(1).copied().unwrap_or(0) as usize;
+            let Ok(nd) = usize::try_from(seg.get(1).copied().unwrap_or(0)) else { return false };
             let other = (seg.get(2).copied().unwrap_or(0) > 0).then(|| ops[1 + nd]);
             (if n > 0 { Self::mask_dims(b, op, 1, nd) } else { Vec::new() }, other)
         } else {
@@ -196,7 +199,7 @@ impl Squeeze<'_> {
             let mut operands = vec![ptr];
             operands.extend(&dynd);
             operands.extend(other);
-            let d = OpData::build(Kind::TtsLoad.name()).operands(&operands).with("operandSegmentSizes", dense_i32(&[1, dynd.len() as i64, i64::from(other.is_some())])).with("static_mask_dims", dense_i64(&statd));
+            let d = OpData::build(Kind::TtsLoad.name()).operands(&operands).with("operandSegmentSizes", dense_i32(&[1, len_i64(dynd.len()), i64::from(other.is_some())])).with("static_mask_dims", dense_i64(&statd));
             let l = c.create(d, &[small]);
             let lv = c.body.res(l, 0);
             let e = OpData::build(Kind::TensorExpandShape.name()).operands(&[lv]).with("reassociation", re).with("static_output_shape", dense_i64(&full_dims));
@@ -212,5 +215,6 @@ impl Squeeze<'_> {
             c.create(OpData::build(Kind::TtsStore.name()).operands(&operands).with("static_mask_dims", dense_i64(&statd)), &[]);
             c.erase_op(op);
         }
+        true
     }
 }

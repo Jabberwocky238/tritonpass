@@ -272,7 +272,7 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> TtBuilder<'a> for mlirpass::Rewrite
         let statics = |xs: &[Ofr]| xs.iter().map(|x| x.static_value()).collect::<Vec<_>>();
         let d = OpData::build(Kind::TtsMakeTptr.name())
             .operands(&operands)
-            .with("operandSegmentSizes", dense_i32(&[1, s.len() as i64, o.len() as i64, sh.len() as i64]))
+            .with("operandSegmentSizes", dense_i32(&[1, len_i64(s.len()), len_i64(o.len()), len_i64(sh.len())]))
             .with("order", dense_i32(order))
             .with("sizes", dense_i64(sizes))
             .with("static_offsets", dense_i64(&statics(offsets)))
@@ -286,6 +286,11 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> TtBuilder<'a> for mlirpass::Rewrite
 /// MLIR 印 i64 的 IntegerAttr 不带类型（`25` 而不是 `25 : i64`）：`I64ArrayAttr` 的元素就是这样。
 pub fn i64_attr(v: i64) -> Attribute<'static> {
     Attribute::Int { lit: v.to_string().into(), ty: None }
+}
+
+/// 容器的长度、下标转成 i64（段长、维号）：总远小于 `i64::MAX`，万一超出取 `i64::MAX`。
+pub fn len_i64(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 /// `ShapedType::kDynamic`：静态数组里表示「这一项是动态的」。

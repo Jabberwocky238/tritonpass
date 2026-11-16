@@ -4,7 +4,7 @@ use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Type};
 use mlirpass::{Body, Def, Diagnostic, Severity, ValueId};
 
-use crate::ir::{TtBuilder, int};
+use crate::ir::{TtBuilder, int, len_i64};
 use crate::pass::ofr::Ofr;
 use crate::pass::ofr::OfrBuilder;
 use crate::{Ir, Kind};
@@ -134,16 +134,16 @@ impl MaskState {
             if !k.values.windows(2).all(|w| w[0] == w[1]) || !matches!(k.ty.element_type(), Type::Integer { .. }) {
                 return false;
             }
-            let Some(x) = b.const_int(v) else { return false };
+            let Some(x) = b.const_int(v).and_then(|x| i64::try_from(x).ok()) else { return false };
             // C++ 写的是 `op.getValue()`（常量的属性，不是结果）：物化出来的常量没人用，状态里存的是属性
-            c.index(x as i64);
-            self.scalar = Some(Ofr::idx(x as i64));
+            c.index(x);
+            self.scalar = Some(Ofr::idx(x));
         } else {
-            let Some(x) = b.const_int(v) else { return false };
+            let Some(x) = b.const_int(v).and_then(|x| i64::try_from(x).ok()) else { return false };
             if !matches!(b.ty(v), Type::Integer { .. } | Type::Index) {
                 return false;
             }
-            self.scalar = Some(Ofr::idx(x as i64));
+            self.scalar = Some(Ofr::idx(x));
         }
         true
     }
@@ -251,10 +251,10 @@ impl MaskState {
         for (x, k) in [(b.opd(mul, 0), b.opd(mul, 1)), (b.opd(mul, 1), b.opd(mul, 0))] {
             if let Some(s) = Self::const_of(b, k)
                 && s > 0
-                && i64::try_from(s).is_ok()
-                && Self::can_peel(b, mul, x, s as i64)
+                && let Ok(s) = i64::try_from(s)
+                && Self::can_peel(b, mul, x, s)
             {
-                return (x, s as i64);
+                return (x, s);
             }
         }
         (v, 1)
@@ -285,7 +285,7 @@ impl MaskState {
         if s >= e {
             return false;
         }
-        let max_index = e as i64 - 1;
+        let Ok(max_index) = i64::try_from(e - 1) else { return false };
         let rw = b.ty(b.res(r, 0)).element_type().int_width().map_or(32, |x| x.0);
         let range_max = if rw >= 64 { i64::MAX } else { (1i64 << (rw - 1)) - 1 };
         let product_max = if pw >= 64 { i64::MAX } else { (1i64 << (pw - 1)) - 1 };
@@ -329,7 +329,7 @@ impl MaskState {
                     let mut groups: Vec<Vec<i64>> = Vec::new();
                     let mut cur: Vec<i64> = Vec::new();
                     for i in 0..shape.len() {
-                        cur.push(i as i64);
+                        cur.push(len_i64(i));
                         if i == d {
                             groups.push(core::mem::take(&mut cur));
                         }
@@ -455,7 +455,7 @@ impl MaskState {
     fn parse_range(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let b = &*c.body;
         let shape = b.ty(b.res(op, 0)).dims().unwrap_or_default();
-        let (s, e) = (b.int_attr(op, "start").unwrap_or(0) as i64, b.int_attr(op, "end").unwrap_or(0) as i64);
+        let (Ok(s), Ok(e)) = (i64::try_from(b.int_attr(op, "start").unwrap_or(0)), i64::try_from(b.int_attr(op, "end").unwrap_or(0))) else { return false };
         let stride = (e - s + shape[0] - 1) / shape[0];
         if stride != 1 {
             return false;
@@ -498,7 +498,7 @@ impl MaskState {
 
     fn parse_expand(&mut self, op: mlirpass::OpId, c: &mut Rewriter<'_, '_>) -> bool {
         let ds = c.body.ty(c.body.res(op, 0)).dims().unwrap_or_default();
-        let axis = c.body.int_attr(op, "axis").unwrap_or(0) as usize;
+        let Ok(axis) = usize::try_from(c.body.int_attr(op, "axis").unwrap_or(0)) else { return false };
         let src = c.body.opd(op, 0);
         let sty = c.body.ty(src).clone();
         let ss = sty.dims().unwrap_or_default();

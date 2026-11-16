@@ -3,7 +3,7 @@ use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Type};
 use mlirpass::{Body, ValueId};
 
-use crate::ir::{TtBuilder, int, integer};
+use crate::ir::{TtBuilder, int, integer, len_i64};
 use crate::{Ir, Kind};
 
 /// `OpFoldResult`：值，或整数属性（`width == 0` 是 index）。两个整数属性相等当且仅当值与类型都相等（MLIR 的属性唯一化）。
@@ -264,7 +264,7 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> OfrBuilder for mlirpass::Rewriter<'
                 for d in &dims {
                     shape_values.push(self.index(*d));
                 }
-                let st = Type::tensor(&[dims.len() as i64], Type::Index);
+                let st = Type::tensor(&[len_i64(dims.len())], Type::Index);
                 // C++ 的 `ReshapeOp::create(b, loc, ty, v, shapeTensor)`：shapeTensor 落在 `bool allowReorder` 上（非空即 true），
                 // 不是操作数；from_elements 照建（死的，之后被收拾掉）
                 let _shape = self.value(Kind::TensorFromElements, &shape_values, st);

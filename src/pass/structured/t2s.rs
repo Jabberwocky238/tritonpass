@@ -6,7 +6,7 @@
 use mlirformat::{Error, Type};
 use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionTarget, Converter, Mode, OpData, OpId, PassManager, Passes, Rewriter, ScfStructural, TypeConverter, ValueId, pass};
 
-use crate::ir::dense_i32;
+use crate::ir::{dense_i32, len_i64};
 use crate::pass::ptr_analysis::PtrAnalysis;
 use crate::pass::uniform_lanes::Canon;
 use crate::{Ir, Kind, pointee};
@@ -123,7 +123,7 @@ impl Prepass {
             let def = rw.body.def_op(inputs[0])?;
             let src = rw.body[def].operands[0];
             let (no, ns) = Self::segments(rw.body.ty(src))?;
-            let d = OpData::build(Kind::TtsGetStructuredState.name()).operands(&[src]).with("resultSegmentSizes", dense_i32(&[1, no as i64, ns as i64]));
+            let d = OpData::build(Kind::TtsGetStructuredState.name()).operands(&[src]).with("resultSegmentSizes", dense_i32(&[1, len_i64(no), len_i64(ns)]));
             let o = rw.create(d, tys);
             Some(rw.body[o].results.to_vec())
         });

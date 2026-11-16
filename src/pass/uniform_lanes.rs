@@ -157,7 +157,7 @@ impl Lanes {
         match b.kind(def) {
             Some(Kind::TtMakeRange) => {
                 let (s, e) = (b.int_attr(def, "start")?, b.int_attr(def, "end")?);
-                Some(Lane { base: None, start: s as i64, count: (e - s) as i64 })
+                Some(Lane { base: None, start: i64::try_from(s).ok()?, count: i64::try_from(e - s).ok()? })
             }
             Some(Kind::ArithAddi) => {
                 for side in 0..2 {
@@ -234,7 +234,8 @@ impl Lanes {
             return false;
         }
         let (Some(s), Some(e)) = (b.int_attr(range, "start"), b.int_attr(range, "end")) else { return false };
-        let (lo, hi) = (s as i64, e as i64 - 1);
+        let (Ok(lo), Ok(e)) = (i64::try_from(s), i64::try_from(e)) else { return false };
+        let hi = e - 1;
         let pick = |t: bool, f: bool| {
             if t {
                 Some(true)

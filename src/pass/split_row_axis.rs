@@ -423,11 +423,11 @@ impl Split {
                 && let Some(d) = Splitter::splat_constant(b, b.opd(def, 1))
                 && b.int_attr(range, "start") == Some(0)
                 && d > 1
+                && let Ok(big_r) = i64::try_from(b.int_attr(range, "end").unwrap_or(0))
+                && big_r % d == 0
+                && big_r / d > 1
             {
-                let big_r = b.int_attr(range, "end").unwrap_or(0) as i64;
-                if big_r % d == 0 && big_r / d > 1 {
-                    return Some((big_r, d));
-                }
+                return Some((big_r, d));
             }
             work.extend(b[def].operands.iter().copied());
         }

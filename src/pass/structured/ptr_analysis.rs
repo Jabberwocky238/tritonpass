@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mlirformat::Type;
 use mlirpass::{Body, Diagnostic, OpData, OpId, Severity, ValueId};
 
-use crate::ir::{TtBuilder, dense_i32, dense_i64};
+use crate::ir::{TtBuilder, dense_i32, dense_i64, len_i64};
 use crate::pass::mask::MaskState;
 use crate::pass::ofr::Ofr;
 use crate::pass::ofr::OfrBuilder;
@@ -136,7 +136,7 @@ impl PtrAnalysis {
             Some(Kind::ArithMuli) => self.visit_mul(d, s, c),
             Some(Kind::TtMakeRange) => {
                 let shape = c.body.ty(v).dims().unwrap_or_default();
-                let (st, en) = (c.body.int_attr(d, "start").unwrap_or(0) as i64, c.body.int_attr(d, "end").unwrap_or(0) as i64);
+                let (Ok(st), Ok(en)) = (i64::try_from(c.body.int_attr(d, "start").unwrap_or(0)), i64::try_from(c.body.int_attr(d, "end").unwrap_or(0))) else { return false };
                 let stride = (en - st + shape[0] - 1) / shape[0];
                 s.offsets.push(Ofr::idx(st));
                 s.sizes.push(Ofr::idx(shape[0]));
@@ -151,7 +151,7 @@ impl PtrAnalysis {
                 if !self.visit(src, s, c) {
                     return false;
                 }
-                let axis = c.body.int_attr(d, "axis").unwrap_or(0) as usize;
+                let Ok(axis) = usize::try_from(c.body.int_attr(d, "axis").unwrap_or(0)) else { return false };
                 s.offsets.insert(axis, Ofr::idx(0));
                 s.sizes.insert(axis, Ofr::idx(1));
                 s.strides.insert(axis, Ofr::idx(0));
@@ -164,7 +164,7 @@ impl PtrAnalysis {
                 if !k.values.windows(2).all(|w| w[0] == w[1]) || !matches!(k.ty.element_type(), Type::Integer { .. }) {
                     return false;
                 }
-                let x = c.body.const_int(v).unwrap_or(0) as i64;
+                let Ok(x) = i64::try_from(c.body.const_int(v).unwrap_or(0)) else { return false };
                 let cv = c.index(x);
                 s.scalar = Some(cv);
                 for (i, n) in c.body.ty(v).dims().unwrap_or_default().iter().enumerate() {
@@ -588,7 +588,7 @@ impl PtrAnalysis {
         let constant = s.int().or_else(|| {
             s.value().and_then(|v| {
                 c.body.def_of(v, Kind::ArithConstant)?;
-                c.body.const_int(v).map(|x| x as i64)
+                c.body.const_int(v).and_then(|x| i64::try_from(x).ok())
             })
         });
         if let Some(k) = constant {
@@ -620,19 +620,19 @@ impl PtrAnalysis {
         let new = match c.body.kind(def) {
             Some(Kind::TtsMakeGatherScatterTptr) => {
                 let b = &*c.body;
-                if b.int_attr(def, "gather_scatter_dim").map(|x| x as usize) != Some(dim) {
+                if b.int_attr(def, "gather_scatter_dim").and_then(|x| usize::try_from(x).ok()) != Some(dim) {
                     return None;
                 }
                 let (base, off) = (b.opd(def, 0), b.opd(def, 1));
                 let sizes = crate::ir::dense_values(b[def].get("sizes"));
-                let (strides, offsets) = Self::mixed_gs(b, def);
+                let (strides, offsets) = Self::mixed_gs(b, def)?;
                 PtrState::gather_scatter_op(c, base, off, Some(um), dim, &sizes, &strides, &offsets)
             }
             Some(Kind::TtsMakeTptr) => {
                 let b = &*c.body;
                 let base = b.opd(def, 0);
                 let sizes = crate::ir::dense_values(b[def].get("sizes"));
-                let (strides, offsets, _) = Self::mixed_tptr(b, def);
+                let (strides, offsets, _) = Self::mixed_tptr(b, def)?;
                 let to_i32 = |o: Ofr, c: &mut Rewriter<'_, '_>| {
                     let mut v = c.ofr_value(o);
                     if matches!(c.body.ty(v), Type::Index) {
@@ -659,9 +659,10 @@ impl PtrAnalysis {
     }
 
     /// tts.make_tptr 的 mixed strides / offsets / shape。静态项照 C++ 的 `getMixedStrides` / `getMixedOffsets`（`getMixedValues`）
-    /// 是 i64 的整数属性，不是 index：物化成常量时是 `arith.constant … : i64`。
-    fn mixed_tptr(b: &Body<'_>, op: OpId) -> (Vec<Ofr>, Vec<Ofr>, Vec<Ofr>) {
+    /// 是 i64 的整数属性，不是 index：物化成常量时是 `arith.constant … : i64`。段长是负数时认不出（`None`）。
+    fn mixed_tptr(b: &Body<'_>, op: OpId) -> Option<(Vec<Ofr>, Vec<Ofr>, Vec<Ofr>)> {
         let seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
+        let len = |i: usize| usize::try_from(seg.get(i).copied().unwrap_or(0)).ok();
         let ops = &b[op].operands;
         let mut at = 1usize;
         let mut mix = |name: &str, n: usize| {
@@ -670,15 +671,16 @@ impl PtrAnalysis {
             let mut it = dynv.iter();
             crate::ir::dense_values(b[op].get(name)).into_iter().map(|x| if x == crate::ir::DYNAMIC { Ofr::V(*it.next().expect("动态项")) } else { Ofr::I(x, 64) }).collect::<Vec<_>>()
         };
-        let s = mix("static_strides", seg.get(1).copied().unwrap_or(0) as usize);
-        let o = mix("static_offsets", seg.get(2).copied().unwrap_or(0) as usize);
-        let sh = mix("static_shape", seg.get(3).copied().unwrap_or(0) as usize);
-        (s, o, sh)
+        let s = mix("static_strides", len(1)?);
+        let o = mix("static_offsets", len(2)?);
+        let sh = mix("static_shape", len(3)?);
+        Some((s, o, sh))
     }
 
-    /// tts.make_gather_scatter_tptr 的 mixed strides / offsets（静态项同样是 i64 的整数属性）。
-    fn mixed_gs(b: &Body<'_>, op: OpId) -> (Vec<Ofr>, Vec<Ofr>) {
+    /// tts.make_gather_scatter_tptr 的 mixed strides / offsets（静态项同样是 i64 的整数属性；段长是负数时同样认不出）。
+    fn mixed_gs(b: &Body<'_>, op: OpId) -> Option<(Vec<Ofr>, Vec<Ofr>)> {
         let seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
+        let len = |i: usize| usize::try_from(seg.get(i).copied().unwrap_or(0)).ok();
         let ops = &b[op].operands;
         let mut at = 2usize;
         let mut mix = |name: &str, n: usize| {
@@ -687,9 +689,9 @@ impl PtrAnalysis {
             let mut it = dynv.iter();
             crate::ir::dense_values(b[op].get(name)).into_iter().map(|x| if x == crate::ir::DYNAMIC { Ofr::V(*it.next().expect("动态项")) } else { Ofr::I(x, 64) }).collect::<Vec<_>>()
         };
-        let s = mix("static_strides", seg.get(2).copied().unwrap_or(0) as usize);
-        let o = mix("static_offsets", seg.get(3).copied().unwrap_or(0) as usize);
-        (s, o)
+        let s = mix("static_strides", len(2)?);
+        let o = mix("static_offsets", len(3)?);
+        Some((s, o))
     }
 
     /// `tts.load` / `tts.store` 的 mask_dims：静态的进数组，动态的进操作数。
@@ -731,7 +733,7 @@ impl PtrAnalysis {
         let mut operands = vec![ptr];
         operands.extend(&dynd);
         operands.extend(scalar_other);
-        let d = OpData::build(Kind::TtsLoad.name()).operands(&operands).with("operandSegmentSizes", dense_i32(&[1, dynd.len() as i64, i64::from(scalar_other.is_some())])).with("static_mask_dims", dense_i64(&statd));
+        let d = OpData::build(Kind::TtsLoad.name()).operands(&operands).with("operandSegmentSizes", dense_i32(&[1, len_i64(dynd.len()), i64::from(scalar_other.is_some())])).with("static_mask_dims", dense_i64(&statd));
         let l = c.create(d, &[res_ty]);
         let lv = c.body.res(l, 0);
         b.replace_op(op, &[lv]);

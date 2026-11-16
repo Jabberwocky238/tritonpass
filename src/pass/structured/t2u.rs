@@ -253,7 +253,8 @@ impl Unstructured {
                     // 第一个动态偏移操作数（tts.make_tptr：基址、行距之后；tt.make_tensor_ptr：shape、strides 之后）
                     let at = if b.is(op, Kind::TtsMakeTptr) {
                         let seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
-                        let at = 1 + seg.get(1).copied().unwrap_or(0) as usize;
+                        let Ok(n) = usize::try_from(seg.get(1).copied().unwrap_or(0)) else { return false };
+                        let at = 1 + n;
                         // 偏移可以全是静态的（基址是 tt.int_to_ptr 这类不是实参的指针时）：C++ 照样取第一个动态偏移，越界断言。
                         // 这里先把第 0 维的偏移换成同值的动态操作数，再照常加上基址的偏移（换不了就整条不动）
                         if seg.get(2) == Some(&0) && !Self::dynamic_offset(b, op, at) {

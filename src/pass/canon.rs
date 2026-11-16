@@ -8,7 +8,7 @@
 use mlirformat::{Attribute, Const, Scalar, Signedness, Type};
 use mlirpass::{Body, EffectInstance, EffectKind, Fold, Folded, OpData, OpId, OpInterfaces, PatternSet, Rewriter, ValueId};
 
-use crate::ir::dense_values;
+use crate::ir::{dense_values, len_i64};
 use crate::{Ir, Kind};
 
 /// tt 方言的 op 接口。
@@ -128,7 +128,7 @@ impl TtCanon {
             Kind::TtTrans => {
                 let order = dense_values(b[op].get("order"));
                 let src = b.opd(op, 0);
-                if order.iter().enumerate().all(|(i, o)| *o == i as i64) && *b.ty(src) == res_ty {
+                if order.iter().enumerate().all(|(i, o)| *o == len_i64(i)) && *b.ty(src) == res_ty {
                     return Some(Folded::Value(src));
                 }
                 let c = Self::splat_const(b, src)?;
@@ -316,7 +316,7 @@ impl ExpandDimsCanon {
         if b.is(def, Kind::TtBroadcast) {
             let x = b.opd(def, 0);
             let xt = b.ty(x).clone();
-            let axis = b.int_attr(op, "axis").unwrap_or(0) as usize;
+            let Ok(axis) = usize::try_from(b.int_attr(op, "axis").unwrap_or(0)) else { return false };
             let mut shape = xt.dims().unwrap_or_default();
             shape.insert(axis, 1);
             let et = Type::tensor(&shape, xt.element_type().clone());

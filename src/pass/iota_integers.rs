@@ -9,7 +9,7 @@ use mlirformat::{Attribute, Error, FloatKind, Type};
 use mlirpass::{Body, OpId, PatternSet, Rewriter, ValueId, pass, patterns};
 
 use super::uniform_lanes::Canon;
-use crate::ir::{TtBuilder, float, int};
+use crate::ir::{TtBuilder, float, int, len_i64};
 use crate::{Ir, Kind};
 
 const MAX_DEPTH: u32 = 24;
@@ -156,7 +156,7 @@ impl Folder<'_, '_, '_> {
         let b = &*self.c.body;
         match b.kind(def) {
             Some(Kind::TtMakeRange) => {
-                let start = b.int_attr(def, "start")? as i64;
+                let start = i64::try_from(b.int_attr(def, "start")?).ok()?;
                 out.add_term(0, (0..shape[0]).map(|i| start + i).collect(), 1)?;
                 Some(out)
             }
@@ -228,7 +228,7 @@ impl Folder<'_, '_, '_> {
                 Some(out)
             }
             Some(Kind::TtExpandDims) => {
-                let axis = b.int_attr(def, "axis")? as usize;
+                let axis = usize::try_from(b.int_attr(def, "axis")?).ok()?;
                 let src = b.opd(def, 0);
                 let mut out = self.affine(src, depth + 1)?;
                 out.shape = shape;
@@ -262,24 +262,24 @@ impl Folder<'_, '_, '_> {
     /// 一根轴上的一维常量向量建成 f32 一维张量：等差就是 v0 + a·idx，否则 v0 + Σ 台阶。
     #[allow(clippy::cast_precision_loss)]
     fn axis_vector(&mut self, v: &[i64]) -> Option<ValueId> {
-        let n = v.len() as i64;
+        let n = len_i64(v.len());
         // 斜率与各台阶先在 i64 里算好（溢出就认不出），再建 op
         let slope = match v.get(1) {
             Some(x) => x.checked_sub(v[0])?,
             None => 0,
         };
-        let arithmetic = v.iter().enumerate().all(|(i, x)| slope.checked_mul(i as i64).and_then(|s| v[0].checked_add(s)) == Some(*x));
+        let arithmetic = v.iter().enumerate().all(|(i, x)| slope.checked_mul(len_i64(i)).and_then(|s| v[0].checked_add(s)) == Some(*x));
         let deltas: Vec<i64> = v.windows(2).map(|w| w[1].checked_sub(w[0])).collect::<Option<_>>()?;
         let f32t = Type::tensor(&[n], Type::Float(FloatKind::F32));
         let idx = self.c.value_with(Kind::TtMakeRange, &[], &[("end", Attribute::of_int(i128::from(n), int(32))), ("start", Attribute::of_int(0, int(32)))], Type::tensor(&[n], int(32)));
         let idxf = self.c.value(Kind::ArithSitofp, &[idx], f32t);
-        let mut result = self.f32_splat(v[0] as f32 as f64, &[n]);
+        let mut result = self.f32_splat(f64::from(v[0] as f32), &[n]);
         if arithmetic {
             if slope != 0 {
                 let term = if slope == 1 {
                     idxf
                 } else {
-                    let s = self.f32_splat(slope as f32 as f64, &[n]);
+                    let s = self.f32_splat(f64::from(slope as f32), &[n]);
                     self.c.binary(Kind::ArithMulf, idxf, s)
                 };
                 result = self.c.binary(Kind::ArithAddf, result, term);
@@ -295,9 +295,9 @@ impl Folder<'_, '_, '_> {
             if v[i] == v[i - 1] {
                 continue;
             }
-            let at = self.f32_splat(i as f32 as f64, &[n]);
+            let at = self.f32_splat(f64::from(i as f32), &[n]);
             let ge = self.cmpf(CmpFPredicate::oge, idxf, at);
-            let d = self.f32_splat(deltas[i - 1] as f32 as f64, &[n]);
+            let d = self.f32_splat(f64::from(deltas[i - 1] as f32), &[n]);
             let step = self.c.select(ge, d, zero);
             result = self.c.binary(Kind::ArithAddf, result, step);
         }
@@ -442,7 +442,7 @@ impl Folder<'_, '_, '_> {
                 let elem = self.c.body.ty(lifted).element_type().clone();
                 let rshape = self.c.body.ty(self.c.body.res(o, 0)).dims()?;
                 lifted = if self.c.body.is(o, Kind::TtExpandDims) {
-                    let axis = self.c.body.int_attr(o, "axis")? as usize;
+                    let axis = usize::try_from(self.c.body.int_attr(o, "axis")?).ok()?;
                     self.expand(lifted, axis, &rshape)
                 } else {
                     self.c.value(Kind::TtBroadcast, &[lifted], Type::tensor(&rshape, elem))

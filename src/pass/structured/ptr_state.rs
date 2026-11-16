@@ -279,7 +279,7 @@ impl PtrState {
         let od = oty.dims().unwrap_or_default();
         if od.len() > 1 {
             let n: i64 = od.iter().product();
-            let reassoc = mlirformat::Attribute::Array(vec![mlirformat::Attribute::Array((0..od.len()).map(|i| crate::ir::i64_attr(i as i64)).collect())]);
+            let reassoc = mlirformat::Attribute::Array(vec![mlirformat::Attribute::Array((0..crate::ir::len_i64(od.len())).map(crate::ir::i64_attr).collect())]);
             let cty = Type::tensor(&[n], oty.element_type().clone());
             off = c.value_with(Kind::TensorCollapseShape, &[off], &[("reassociation", reassoc)], cty);
             self.offsets[d] = Ofr::V(off);
@@ -311,7 +311,7 @@ impl PtrState {
         let d = OpData::build(Kind::TtsMakeGatherScatterTptr.name())
             .operands(&operands)
             .with("gather_scatter_dim", mlirformat::Attribute::of_int(dim as i128, crate::ir::int(32)))
-            .with("operandSegmentSizes", dense_i32(&[1, 1, dyn_str.len() as i64, dyn_off.len() as i64, i64::from(mask.is_some())]))
+            .with("operandSegmentSizes", dense_i32(&[1, 1, crate::ir::len_i64(dyn_str.len()), crate::ir::len_i64(dyn_off.len()), i64::from(mask.is_some())]))
             .with("sizes", dense_i64(sizes))
             .with("static_offsets", dense_i64(&st_off))
             .with("static_strides", dense_i64(&st_str));
