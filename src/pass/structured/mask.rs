@@ -2,7 +2,7 @@
 //! 认不出的一维记成非结构化 mask（一维 i1 张量）。分析途中建的 arith op 照 C++ 当场建。
 use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Type};
-use mlirpass::{Body, Def, ValueId};
+use mlirpass::{Body, Def, Diagnostic, Severity, ValueId};
 
 use crate::ir::{TtBuilder, int};
 use crate::pass::ofr::Ofr;
@@ -524,13 +524,30 @@ impl MaskState {
                         return false;
                     }
                     let (d, _) = u[0];
+                    if d >= self.dims.len() {
+                        return Self::rank_mismatch(op, c);
+                    }
                     self.dims[d] = Ofr::idx(ss[d]);
+                }
+                if axis > self.masks.len() {
+                    return Self::rank_mismatch(op, c);
                 }
                 self.masks.insert(axis, None);
             }
         }
+        if axis > self.dims.len() {
+            return Self::rank_mismatch(op, c);
+        }
         self.dims.insert(axis, Ofr::idx(1));
         true
+    }
+
+    /// 源分析出来的状态比源张量的秩短（源的分析半途而废却留下了状态、源是常量只剩标量）：C++ 照样按下标改、按 axis 插，
+    /// 越界断言崩溃；这里报警告，当认不出这个 mask。
+    fn rank_mismatch(op: OpId, c: &mut Rewriter<'_, '_>) -> bool {
+        let d = Diagnostic::at(c.body, op, Severity::Warning, "mask 分析：tt.expand_dims 的源分析出来的状态维数不够，认不出这个 mask");
+        c.body.report(d);
+        false
     }
 }
 

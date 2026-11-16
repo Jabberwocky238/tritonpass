@@ -4,3 +4,6 @@
 regress__structured__advance_non_block_state.0#0                  参照断言 state.isBlockPtr() 崩溃；tritonpass 不改写这条 tt.advance
 regress__structured__t2u_static_offsets.0#0                       参照取第一个动态偏移越界断言崩溃（偏移全是静态）；tritonpass 把第 0 维偏移换成动态再加基址偏移
 regress__structured__t2u_static_offsets.0#1                       同上（基址是 tt.addptr，结果偏移是 k + 5）
+regress__structured__mask_expand_dims_const.0#0                   参照 parseExpandDims 按 axis 插入越界断言崩溃（常量 mask 只剩标量）；tritonpass 报警告、认不出这个 mask
+regress__structured__mask_expand_dims_rank.0#0                    参照 parseExpandDims 按 axis 插入越界断言崩溃（与的分析没有维）；tritonpass 报警告、认不出这个 mask
+regress__structured__mask_expand_dims_rank.0#1                    参照 parseExpandDims 按维下标改 dims 越界断言崩溃；tritonpass 报警告、认不出这个 mask
