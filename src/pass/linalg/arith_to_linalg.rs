@@ -107,6 +107,46 @@ impl MinMax {
     }
 }
 
+/// `applyTensorConcatDecomposition`（上游 `populateDecomposeTensorConcatPatterns` 的 `DecomposeTensorConcatOp`，即
+/// `ConcatOp::decomposeOperation`）：tensor.concat ⇒ 一块 tensor.empty，各输入依次 insert_slice 到拼接维上累加的偏移。
+/// tt.cat 出来的都是静态形状；动态形状要 tensor.dim 与 affine.apply，这里不做，留着 concat。
+struct Concat;
+
+#[patterns]
+impl Concat {
+    #[rewrite("tensor.concat", name = "DecomposeTensorConcatOp")]
+    fn decompose(rw: &mut Rewriter<'_, '_>, op: OpId) -> bool {
+        let b = &*rw.body;
+        let rt = b.ty(b.res(op, 0)).clone();
+        let inputs = b[op].operands.to_vec();
+        let shapes: Vec<Vec<i64>> = inputs.iter().map(|v| L::dims(b.ty(*v))).collect();
+        if L::dims(&rt).contains(&mlirformat::Dim::DYNAMIC) || shapes.iter().flatten().any(|d| *d == mlirformat::Dim::DYNAMIC) {
+            return false;
+        }
+        let Some(dim) = b.int_attr(op, "dim").and_then(|d| usize::try_from(d).ok()).filter(|d| shapes.iter().all(|s| d < &s.len())) else { return false };
+        let loc = b[op].loc.clone();
+        rw.set_before(op);
+        let mut e = OpData::build(Kind::TensorEmpty.name());
+        e.loc.clone_from(&loc);
+        let empty = rw.create(e, core::slice::from_ref(&rt));
+        let mut result = rw.body[empty].results[0];
+        let mut at = 0;
+        for (input, shape) in inputs.iter().zip(&shapes) {
+            let mut offsets = vec![mlirpass::MemrefOfr::C(0); shape.len()];
+            offsets[dim] = mlirpass::MemrefOfr::C(at);
+            let sizes = shape.iter().map(|d| mlirpass::MemrefOfr::C(*d)).collect();
+            let strides = vec![mlirpass::MemrefOfr::C(1); shape.len()];
+            let mut d = OpData::sliced(Kind::TensorInsertSlice.name(), &[*input, result], &[offsets, sizes, strides]);
+            d.loc.clone_from(&loc);
+            let s = rw.create(d, core::slice::from_ref(&rt));
+            result = rw.body[s].results[0];
+            at += shape[dim];
+        }
+        rw.replace_op(op, &[result]);
+        true
+    }
+}
+
 /// 建 linalg / tensor op 的小工具。
 struct L;
 
@@ -512,7 +552,7 @@ impl Tt {
         true
     }
 
-    /// `CatConverter`：tt.cat ⇒ `tensor.concat dim(0)`（之后由 concat 分解改写成 insert_slice）。
+    /// `CatConverter`：tt.cat ⇒ `tensor.concat dim(0)`（转换之后由 [`Concat`] 拆成 insert_slice）。
     #[convert("tt.cat")]
     fn cat(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let rt = L::rty(cr, op);
@@ -1198,7 +1238,10 @@ impl Run for TritonArithToLinalg {
         }
         patterns.add(Elementwise);
         Converter::new(&target, &patterns, ConversionConfig::default()).apply(body, &[op], Mode::Partial)?;
-        body.apply_greedily(region, &PatternSet::default(), &GreedyConfig::default());
+        // applyTensorConcatDecomposition：tt.cat 转出的 tensor.concat 拆成 insert_slice（贪婪驱动顺带折叠、删死 op）
+        let mut concat = PatternSet::default();
+        Concat::patterns(&mut concat);
+        body.apply_greedily(region, &concat, &GreedyConfig::default());
         if self.tt_to_func_func {
             Self::to_func(body, op);
         }
