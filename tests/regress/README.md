@@ -18,3 +18,8 @@ python3 -I scripts/fixtures.py --ref <dope-opt> --only regress --check   # compa
 | directory | what it covers |
 |---|---|
 | `args-mode/` | the full pipeline with `triton-arith-to-linalg`'s default `pids-to-func-args` encoding (the pipeline group only runs the gpu encoding) |
+| `dialect/` | custom syntax round trips (`scf.while`, `llvm.intr.assume`, `tt.make_tensor_descriptor`, …), tt folds and memory effects, FNUZ floats |
+| `linalg/` | `triton-arith-to-linalg`, `structured-to-memref` and `triton-ptr-to-memref` cases: quoted callees, rounding modes, `tt.cat`, gather/scatter, nested modules, rank-0 pointers |
+| `norm/` | the normalization passes: bool pointers carried by loops, `fold-iota-integers` term lengths and overflow, `split-row-axis` rollback |
+| `structured/` | `triton-to-structured` / `triton-to-unstructured`: block pointers, ranked-tensor-only prepass, static offsets, mask and loop-state bounds |
+| `verify/` | invalid IR that both the reference and `tritonpass::verify` must reject |
