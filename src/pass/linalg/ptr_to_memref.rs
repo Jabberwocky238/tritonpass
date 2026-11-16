@@ -1,5 +1,5 @@
 //! `triton-ptr-to-memref`（triton-shared `TritonPtrToMemrefPass.cpp`，改过签名）：函数签名里的指针换成一维动态的
-//! `memref<?xT>`（指针张量换成同形的 memref），块参数一并换；旧用处经源物化的 `builtin.unrealized_conversion_cast` 接上，
+//! `memref<?xT>`（指针张量换成同形的 memref），入口块的参数一并换；旧用处经源物化的 `builtin.unrealized_conversion_cast` 接上，
 //! 之后 canonicalize + cse 把成对的转换折掉。
 use mlirformat::{Attribute, Dim, Error, FunctionType, Type};
 use mlirpass::{ConversionConfig, ConversionPatterns, ConversionRewriter, ConversionTarget, Converter, Mode, OpData, OpId, PassManager, Passes, Rewriter, SignatureConversion, TypeConverter, ValueId, pass, patterns};
@@ -59,7 +59,9 @@ impl Sig {
 
 #[patterns(converter)]
 impl Sig {
-    /// `FunctionOpInterfaceSignatureConversion`。
+    /// `FunctionOpInterfaceSignatureConversion`（`convertFuncOpTypes`）：签名转换只施在入口块上
+    /// （`applySignatureConversion(&body.front(), …)`）；别的块的参数归分支 op 的转换管，这里没有那些模式，原样留着
+    /// （分支传进去的是源物化的 cast，类型对得上）。
     #[convert("func.func", "tt.func")]
     fn function(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let Some(ft) = Self::function_type(cr.rw.body, op) else { return false };
@@ -72,8 +74,8 @@ impl Sig {
         let Some(results) = tc.convert_all(&ft.results) else { return false };
         let converter = cr.current.expect("转换器");
         let region = cr.rw.body[op].regions[0];
-        if cr.convert_region_types(region, converter, Some(&sig)).is_none() {
-            return false;
+        if let Some(&entry) = cr.rw.body[region].blocks.first() {
+            cr.apply_signature_conversion(entry, &sig, Some(converter));
         }
         let nt = FunctionType { inputs: sig.converted_types().to_vec(), results, ..ft };
         cr.modify(op, |b| b[op].set("function_type", Attribute::Type(Type::Function(Box::new(nt)))));
