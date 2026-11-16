@@ -118,10 +118,13 @@ impl Folder<'_, '_, '_> {
         let b = &*self.c.body;
         b.def_of(v, Kind::ArithConstant)?;
         let k = b.constant(v)?;
-        k.values.iter().map(|s| match s {
-            mlirformat::Scalar::Int(i) => i64::try_from(i.signed()).ok(),
-            _ => None,
-        }).collect()
+        k.values
+            .iter()
+            .map(|s| match s {
+                mlirformat::Scalar::Int(i) => i64::try_from(i.signed()).ok(),
+                _ => None,
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_lines)]

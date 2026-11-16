@@ -134,7 +134,13 @@ impl Match {
             return None;
         }
         let (cmp, cond) = (bops[0], bops[1]);
-        if !b.is(cmp, Kind::ArithCmpi) || !b.is(cond, Kind::ScfCondition) || b.int_attr(cmp, "predicate") != Some(CmpIPredicate::slt as i128) || b.opd(cmp, 0) != bargs[0] || b.opd(cmp, 1) != bargs[1] || b[cond].operands[..] != [b.res(cmp, 0), bargs[0], bargs[1]] {
+        if !b.is(cmp, Kind::ArithCmpi)
+            || !b.is(cond, Kind::ScfCondition)
+            || b.int_attr(cmp, "predicate") != Some(CmpIPredicate::slt as i128)
+            || b.opd(cmp, 0) != bargs[0]
+            || b.opd(cmp, 1) != bargs[1]
+            || b[cond].operands[..] != [b.res(cmp, 0), bargs[0], bargs[1]]
+        {
             return None;
         }
         let after = b.entry(loop_, 1);

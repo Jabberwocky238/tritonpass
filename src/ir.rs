@@ -333,4 +333,3 @@ pub fn dense_values(a: Option<&Attribute<'_>>) -> Vec<i64> {
         _ => Vec::new(),
     }
 }
-

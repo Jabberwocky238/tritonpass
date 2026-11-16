@@ -110,7 +110,6 @@ impl ScalarStore {
         }
         Self::entry_argument(b, ptr).then_some((ptr, offsets))
     }
-
 }
 
 #[patterns]

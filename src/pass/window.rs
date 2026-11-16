@@ -220,7 +220,8 @@ impl Window {
                 StrideKind::Bad => return Err("行距来自数据或复杂表达式，不是整数标量实参或常量"),
             }
         }
-        if !plan.remainder.is_empty() && plan.absorb.is_none()
+        if !plan.remainder.is_empty()
+            && plan.absorb.is_none()
             && let Some(d) = (0..rank).rev().find(|d| t.sizes[*d] == 1)
         {
             plan.absorb = Some(d);

@@ -4,11 +4,11 @@ use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Type};
 use mlirpass::{Body, Def, ValueId};
 
-use crate::pass::ofr::Ofr;
 use crate::ir::{TtBuilder, int};
+use crate::pass::ofr::Ofr;
 use crate::pass::ofr::OfrBuilder;
-use mlirpass::Rewriter;
 use crate::{Ir, Kind};
+use mlirpass::Rewriter;
 
 #[derive(Debug, Clone, Default)]
 pub struct MaskState {

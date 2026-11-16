@@ -6,8 +6,8 @@
 use mlirformat::{Error, Type};
 use mlirpass::{Body, ConversionConfig, ConversionPatterns, ConversionTarget, Converter, Mode, OpData, OpId, PassManager, Passes, Rewriter, ScfStructural, TypeConverter, ValueId, pass};
 
-use crate::pass::ptr_analysis::PtrAnalysis;
 use crate::ir::dense_i32;
+use crate::pass::ptr_analysis::PtrAnalysis;
 use crate::pass::uniform_lanes::Canon;
 use crate::{Ir, Kind, pointee};
 

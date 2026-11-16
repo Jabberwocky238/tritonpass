@@ -71,7 +71,13 @@ impl Mem {
         let mut offset = off;
         // SaturatedInteger：0 乘什么都是 0，否则有一个动态就是动态
         for (o, st) in offsets.iter().map(c).zip(&strides) {
-            let term = if o == 0 || *st == 0 { 0 } else if o == Dim::DYNAMIC || *st == Dim::DYNAMIC { Dim::DYNAMIC } else { o * st };
+            let term = if o == 0 || *st == 0 {
+                0
+            } else if o == Dim::DYNAMIC || *st == Dim::DYNAMIC {
+                Dim::DYNAMIC
+            } else {
+                o * st
+            };
             offset = if offset == Dim::DYNAMIC || term == Dim::DYNAMIC { Dim::DYNAMIC } else { offset + term };
         }
         Self::memref(&sizes.iter().map(c).collect::<Vec<_>>(), (*s.elem).clone(), Some(StridedLayout { strides, offset }))
@@ -82,7 +88,15 @@ impl Mem {
         let Type::Shaped(s) = src else { unreachable!("memref") };
         let (src_strides, off) = s.strides_and_offset().expect("strided");
         let c = |o: &Ofr| o.int().unwrap_or(Dim::DYNAMIC);
-        let mul = |a: i64, b: i64| if a == 0 || b == 0 { 0 } else if a == Dim::DYNAMIC || b == Dim::DYNAMIC { Dim::DYNAMIC } else { a * b };
+        let mul = |a: i64, b: i64| {
+            if a == 0 || b == 0 {
+                0
+            } else if a == Dim::DYNAMIC || b == Dim::DYNAMIC {
+                Dim::DYNAMIC
+            } else {
+                a * b
+            }
+        };
         let add = |a: i64, b: i64| if a == Dim::DYNAMIC || b == Dim::DYNAMIC { Dim::DYNAMIC } else { a + b };
         let mut offset = off;
         for (o, st) in offsets.iter().map(c).zip(&src_strides) {
@@ -113,10 +127,13 @@ impl Mem {
     /// `isPositiveZero`：+0.0 或整数 0（标量或 splat）。
     fn positive_zero(b: &Body<'_>, v: ValueId) -> bool {
         let Some(c) = b.constant(v) else { return false };
-        c.values.first().is_some_and(|x| c.values.iter().all(|y| y == x) && match x {
-            mlirformat::Scalar::Int(i) => i.signed() == 0,
-            mlirformat::Scalar::Float(f) => f.to_f64() == 0.0 && !f.to_f64().is_sign_negative(),
-            _ => false,
+        c.values.first().is_some_and(|x| {
+            c.values.iter().all(|y| y == x)
+                && match x {
+                    mlirformat::Scalar::Int(i) => i.signed() == 0,
+                    mlirformat::Scalar::Float(f) => f.to_f64() == 0.0 && !f.to_f64().is_sign_negative(),
+                    _ => false,
+                }
         })
     }
 
@@ -330,15 +347,7 @@ impl GatherScatter {
         let strides = Tptr::mixed(b, op, "static_strides", &ops[2..2 + ns]);
         let offsets = Tptr::mixed(b, op, "static_offsets", &ops[2 + ns..2 + ns + no]);
         let mask = (n(4) > 0).then(|| ops[2 + ns + no]);
-        Self {
-            offset: ops[1],
-            mask,
-            dim: b.int_attr(op, "gather_scatter_dim").unwrap_or(0) as usize,
-            sizes: dense_values(b[op].get("sizes")),
-            strides,
-            offsets,
-            result: b.ty(b.res(op, 0)).owned(),
-        }
+        Self { offset: ops[1], mask, dim: b.int_attr(op, "gather_scatter_dim").unwrap_or(0) as usize, sizes: dense_values(b[op].get("sizes")), strides, offsets, result: b.ty(b.res(op, 0)).owned() }
     }
 
     /// `getMixedStridesForMemref`：尺寸为 1、行距为常量 0 的维换成累乘的尺寸（从最内一维往外）。

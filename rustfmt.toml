@@ -1,0 +1,7 @@
+# Wide lines, as the existing code is written; `mod` declarations keep their per-directory grouping.
+# The generated dialect files (`src/dialect/*.gen.rs`) are `#[rustfmt::skip]`ped in `src/dialect.rs`
+# so they stay exactly as the generator writes them.
+edition = "2024"
+max_width = 220
+use_small_heuristics = "Max"
+reorder_modules = false

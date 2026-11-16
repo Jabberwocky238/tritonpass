@@ -672,14 +672,20 @@ impl Tt {
         let is = |o: OpId, k: Kind, x: ValueId, y: ValueId| b.is(o, k) && b.opd(o, 0) == x && b.opd(o, 1) == y;
         let p = |o: OpId| b.int_attr(o, "predicate").map(i128::from);
         let [eq, slt, and, cmp, or, vsel, isel, ret] = ops[..] else { return false };
-        let ok = is(eq, Kind::ArithCmpf, cv, rv) && p(eq) == Some(CMPF_OEQ)
-            && is(slt, Kind::ArithCmpi, ci, ri) && p(slt) == Some(CMPI_SLT)
+        let ok = is(eq, Kind::ArithCmpf, cv, rv)
+            && p(eq) == Some(CMPF_OEQ)
+            && is(slt, Kind::ArithCmpi, ci, ri)
+            && p(slt) == Some(CMPI_SLT)
             && is(and, Kind::ArithAndi, res(eq), res(slt))
-            && is(cmp, Kind::ArithCmpf, cv, rv) && p(cmp) == Some(pred)
+            && is(cmp, Kind::ArithCmpf, cv, rv)
+            && p(cmp) == Some(pred)
             && is(or, Kind::ArithOri, res(cmp), res(and))
-            && b.is(vsel, Kind::ArithSelect) && b[vsel].operands[..] == [res(or), cv, rv]
-            && b.is(isel, Kind::ArithSelect) && b[isel].operands[..] == [res(or), ci, ri]
-            && b.is(ret, Kind::TtReduceReturn) && b[ret].operands[..] == [res(vsel), res(isel)];
+            && b.is(vsel, Kind::ArithSelect)
+            && b[vsel].operands[..] == [res(or), cv, rv]
+            && b.is(isel, Kind::ArithSelect)
+            && b[isel].operands[..] == [res(or), ci, ri]
+            && b.is(ret, Kind::TtReduceReturn)
+            && b[ret].operands[..] == [res(vsel), res(isel)];
         if !ok {
             return false;
         }
@@ -863,7 +869,24 @@ struct Reduce;
 impl Reduce {
     fn supported(k: Kind) -> bool {
         use Kind as K;
-        matches!(k, K::ArithAddf | K::ArithAddi | K::ArithAndi | K::ArithMaximumf | K::ArithMulf | K::ArithMuli | K::ArithMaxnumf | K::ArithMinimumf | K::ArithMinnumf | K::ArithMinsi | K::ArithMinui | K::ArithMaxsi | K::ArithMaxui | K::ArithOri | K::ArithXori)
+        matches!(
+            k,
+            K::ArithAddf
+                | K::ArithAddi
+                | K::ArithAndi
+                | K::ArithMaximumf
+                | K::ArithMulf
+                | K::ArithMuli
+                | K::ArithMaxnumf
+                | K::ArithMinimumf
+                | K::ArithMinnumf
+                | K::ArithMinsi
+                | K::ArithMinui
+                | K::ArithMaxsi
+                | K::ArithMaxui
+                | K::ArithOri
+                | K::ArithXori
+        )
     }
 
     /// 窄浮点输入的浮点 combiner 一律升 f32 累加。
@@ -896,18 +919,53 @@ struct Extern;
 
 impl Extern {
     const UNARY: [(&'static str, Kind); 47] = [
-        ("__nv_fabsf", Kind::MathAbsf), ("__nv_fabs", Kind::MathAbsf), ("__nv_sinf", Kind::MathSin), ("__nv_sin", Kind::MathSin),
-        ("__nv_cosf", Kind::MathCos), ("__nv_cos", Kind::MathCos), ("__nv_tanf", Kind::MathTan), ("__nv_tan", Kind::MathTan),
-        ("__nv_asinf", Kind::MathAsin), ("__nv_asin", Kind::MathAsin), ("__nv_acosf", Kind::MathAcos), ("__nv_acos", Kind::MathAcos),
-        ("__nv_atanf", Kind::MathAtan), ("__nv_atan", Kind::MathAtan), ("__nv_sinhf", Kind::MathSinh), ("__nv_sinh", Kind::MathSinh),
-        ("__nv_coshf", Kind::MathCosh), ("__nv_cosh", Kind::MathCosh), ("__nv_tanhf", Kind::MathTanh), ("__nv_acoshf", Kind::MathAcosh),
-        ("__nv_acosh", Kind::MathAcosh), ("__nv_asinhf", Kind::MathAsinh), ("__nv_asinh", Kind::MathAsinh), ("__nv_atanhf", Kind::MathAtanh),
-        ("__nv_logf", Kind::MathLog), ("__nv_log", Kind::MathLog), ("__nv_log10f", Kind::MathLog10), ("__nv_log10", Kind::MathLog10),
-        ("__nv_log1pf", Kind::MathLog1p), ("__nv_log1p", Kind::MathLog1p), ("__nv_expf", Kind::MathExp), ("__nv_exp", Kind::MathExp),
-        ("__nv_exp2f", Kind::MathExp2), ("__nv_exp2", Kind::MathExp2), ("__nv_erff", Kind::MathErf), ("__nv_erf", Kind::MathErf),
-        ("__nv_sqrtf", Kind::MathSqrt), ("__nv_sqrt", Kind::MathSqrt), ("__nv_rsqrtf", Kind::MathRsqrt), ("__nv_rsqrt", Kind::MathRsqrt),
-        ("__nv_ceilf", Kind::MathCeil), ("__nv_ceil", Kind::MathCeil), ("__nv_floorf", Kind::MathFloor), ("__nv_floor", Kind::MathFloor),
-        ("__nv_truncf", Kind::MathTrunc), ("__nv_trunc", Kind::MathTrunc), ("__nv_tanh", Kind::MathTanh),
+        ("__nv_fabsf", Kind::MathAbsf),
+        ("__nv_fabs", Kind::MathAbsf),
+        ("__nv_sinf", Kind::MathSin),
+        ("__nv_sin", Kind::MathSin),
+        ("__nv_cosf", Kind::MathCos),
+        ("__nv_cos", Kind::MathCos),
+        ("__nv_tanf", Kind::MathTan),
+        ("__nv_tan", Kind::MathTan),
+        ("__nv_asinf", Kind::MathAsin),
+        ("__nv_asin", Kind::MathAsin),
+        ("__nv_acosf", Kind::MathAcos),
+        ("__nv_acos", Kind::MathAcos),
+        ("__nv_atanf", Kind::MathAtan),
+        ("__nv_atan", Kind::MathAtan),
+        ("__nv_sinhf", Kind::MathSinh),
+        ("__nv_sinh", Kind::MathSinh),
+        ("__nv_coshf", Kind::MathCosh),
+        ("__nv_cosh", Kind::MathCosh),
+        ("__nv_tanhf", Kind::MathTanh),
+        ("__nv_acoshf", Kind::MathAcosh),
+        ("__nv_acosh", Kind::MathAcosh),
+        ("__nv_asinhf", Kind::MathAsinh),
+        ("__nv_asinh", Kind::MathAsinh),
+        ("__nv_atanhf", Kind::MathAtanh),
+        ("__nv_logf", Kind::MathLog),
+        ("__nv_log", Kind::MathLog),
+        ("__nv_log10f", Kind::MathLog10),
+        ("__nv_log10", Kind::MathLog10),
+        ("__nv_log1pf", Kind::MathLog1p),
+        ("__nv_log1p", Kind::MathLog1p),
+        ("__nv_expf", Kind::MathExp),
+        ("__nv_exp", Kind::MathExp),
+        ("__nv_exp2f", Kind::MathExp2),
+        ("__nv_exp2", Kind::MathExp2),
+        ("__nv_erff", Kind::MathErf),
+        ("__nv_erf", Kind::MathErf),
+        ("__nv_sqrtf", Kind::MathSqrt),
+        ("__nv_sqrt", Kind::MathSqrt),
+        ("__nv_rsqrtf", Kind::MathRsqrt),
+        ("__nv_rsqrt", Kind::MathRsqrt),
+        ("__nv_ceilf", Kind::MathCeil),
+        ("__nv_ceil", Kind::MathCeil),
+        ("__nv_floorf", Kind::MathFloor),
+        ("__nv_floor", Kind::MathFloor),
+        ("__nv_truncf", Kind::MathTrunc),
+        ("__nv_trunc", Kind::MathTrunc),
+        ("__nv_tanh", Kind::MathTanh),
     ];
     const BINARY: [(&'static str, Kind); 4] = [("__nv_atan2f", Kind::MathAtan2), ("__nv_atan2", Kind::MathAtan2), ("__nv_powf", Kind::MathPowf), ("__nv_pow", Kind::MathPowf)];
 

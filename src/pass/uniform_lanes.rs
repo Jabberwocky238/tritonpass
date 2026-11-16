@@ -20,7 +20,20 @@ const MAX_DEPTH: u32 = 8;
 pub fn fold_uniform_lanes<'a>(body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
     // 四步各一遍 walk（divsi、remsi、cmpi、load），后一步看得到前一步折出来的 arange
     let mut changed = false;
-    for add in [|s: &mut PatternSet| { s.add(FoldDiv); }, |s: &mut PatternSet| { s.add(FoldRem); }, |s: &mut PatternSet| { s.add(FoldCompare); }, |s: &mut PatternSet| { s.add(FoldLoad); }] {
+    for add in [
+        |s: &mut PatternSet| {
+            s.add(FoldDiv);
+        },
+        |s: &mut PatternSet| {
+            s.add(FoldRem);
+        },
+        |s: &mut PatternSet| {
+            s.add(FoldCompare);
+        },
+        |s: &mut PatternSet| {
+            s.add(FoldLoad);
+        },
+    ] {
         let mut set = PatternSet::default();
         add(&mut set);
         changed |= body.walk_and_apply(op, &set);
@@ -222,7 +235,15 @@ impl Lanes {
         }
         let (Some(s), Some(e)) = (b.int_attr(range, "start"), b.int_attr(range, "end")) else { return false };
         let (lo, hi) = (s as i64, e as i64 - 1);
-        let pick = |t: bool, f: bool| if t { Some(true) } else if f { Some(false) } else { None };
+        let pick = |t: bool, f: bool| {
+            if t {
+                Some(true)
+            } else if f {
+                Some(false)
+            } else {
+                None
+            }
+        };
         let all = match b.int_attr(op, "predicate") {
             Some(p) if p == CmpIPredicate::slt as i128 => pick(hi < c, lo >= c),
             Some(p) if p == CmpIPredicate::sle as i128 => pick(hi <= c, lo > c),

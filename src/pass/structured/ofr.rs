@@ -279,4 +279,3 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> OfrBuilder for mlirpass::Rewriter<'
         Ofr::V(self.index_type_cast(v, &tty))
     }
 }
-

@@ -37,7 +37,9 @@ impl Sig {
             _ => None,
         });
         tc.conversion(|t| match t {
-            Type::Shaped(s) if s.kind == mlirformat::ShapedKind::Tensor && matches!(&*s.elem, Type::Extended(e) if e.name == "tt.ptr") => Some(Some(vec![Mem::memref(&t.dims().unwrap_or_default(), pointee(&s.elem), None)])),
+            Type::Shaped(s) if s.kind == mlirformat::ShapedKind::Tensor && matches!(&*s.elem, Type::Extended(e) if e.name == "tt.ptr") => {
+                Some(Some(vec![Mem::memref(&t.dims().unwrap_or_default(), pointee(&s.elem), None)]))
+            }
             _ => None,
         });
         tc.source(|rw: &mut Rewriter<'_, '_>, ty, inputs| {

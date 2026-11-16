@@ -505,11 +505,7 @@ impl Split {
         if !Self::classify(body, body.opd(add, 1), big_r, &mut rows, &mut cols, 0) || rows.is_empty() {
             return false;
         }
-        let mask = if is_load {
-            (body[op].operands.len() >= 2).then(|| body.opd(op, 1))
-        } else {
-            (body[op].operands.len() >= 3).then(|| body.opd(op, 2))
-        };
+        let mask = if is_load { (body[op].operands.len() >= 2).then(|| body.opd(op, 1)) } else { (body[op].operands.len() >= 3).then(|| body.opd(op, 2)) };
         let base_src = body.opd(base, 0);
         let ptr_elem = ptr_ty.element_type().clone();
         rw.set_before(op);

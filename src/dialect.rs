@@ -1,13 +1,16 @@
 //! Triton 的方言：`tt`（Triton 3.7.1 的 `TritonOps.td`）、`tts`（triton-shared 的结构化方言，`TritonStructuredDialect.td`）。
 //! 两个 `.gen.rs` 由 `mlirformat tblgen` 生成，不手改；语法写在 C++ 里的 op 手写在 `tt_hand`，按名字注入。
+#[rustfmt::skip]
 #[path = "dialect/tt.gen.rs"]
 mod tt;
 #[path = "dialect/tt_hand.rs"]
 mod tt_hand;
+#[rustfmt::skip]
 #[path = "dialect/tts.gen.rs"]
 mod tts;
 #[path = "dialect/ttg.rs"]
 mod ttg;
+#[rustfmt::skip]
 #[path = "dialect/traits.gen.rs"]
 mod traits;
 #[path = "dialect/upstream_hand.rs"]
@@ -17,8 +20,8 @@ use mlirformat::{MlirOpt, Op};
 
 pub use tt::TtDialect;
 pub use tt_hand::pointee;
-pub use tts::TtsDialect;
 pub use ttg::TtgDialect;
+pub use tts::TtsDialect;
 
 /// 往 `opt` 里装 Triton 的方言，并注入手写语法的 op。
 pub fn load_triton(opt: &mut MlirOpt) {

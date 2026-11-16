@@ -3,11 +3,11 @@
 use mlirformat::Type;
 use mlirpass::{Body, OpData, ValueId};
 
+use crate::ir::{TtBuilder, dense_i32, dense_i64};
 use crate::pass::ofr::Ofr;
-use crate::ir::{dense_i32, dense_i64, TtBuilder};
 use crate::pass::ofr::OfrBuilder;
-use mlirpass::Rewriter;
 use crate::{Ir, Kind, pointee};
+use mlirpass::Rewriter;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PtrState {
@@ -303,11 +303,7 @@ impl PtrState {
         let st_str: Vec<i64> = strides.iter().map(|s| s.static_value()).collect();
         let base_ty = c.body.ty(base).clone();
         let elem = pointee(&base_ty);
-        let ty = if mask.is_some() && matches!(c.body.ty(off), Type::Integer { .. } | Type::Index) {
-            PtrState::ptr_to(&base_ty, &elem)
-        } else {
-            PtrState::ptr_to(&base_ty, &Type::tensor(sizes, elem))
-        };
+        let ty = if mask.is_some() && matches!(c.body.ty(off), Type::Integer { .. } | Type::Index) { PtrState::ptr_to(&base_ty, &elem) } else { PtrState::ptr_to(&base_ty, &Type::tensor(sizes, elem)) };
         let mut operands = vec![base, off];
         operands.extend(&dyn_str);
         operands.extend(&dyn_off);

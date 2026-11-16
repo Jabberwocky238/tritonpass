@@ -31,7 +31,18 @@ impl<'a> CfgToScfInterface<'a> for TtControlFlowToScf {
         self.0.switch_value(body, at, loc, value)
     }
 
-    fn cfg_switch(&mut self, body: &mut Body<'a>, at: CfgAt, loc: Option<Str<'a>>, flag: ValueId, case_values: &[u32], case_dests: &[BlockId], case_args: &[Vec<ValueId>], default: BlockId, default_args: &[ValueId]) -> OpId {
+    fn cfg_switch(
+        &mut self,
+        body: &mut Body<'a>,
+        at: CfgAt,
+        loc: Option<Str<'a>>,
+        flag: ValueId,
+        case_values: &[u32],
+        case_dests: &[BlockId],
+        case_args: &[Vec<ValueId>],
+        default: BlockId,
+        default_args: &[ValueId],
+    ) -> OpId {
         self.0.cfg_switch(body, at, loc, flag, case_values, case_dests, case_args, default, default_args)
     }
 

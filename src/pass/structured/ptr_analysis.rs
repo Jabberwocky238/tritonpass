@@ -6,13 +6,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mlirformat::Type;
 use mlirpass::{Body, Diagnostic, OpData, OpId, Severity, ValueId};
 
+use crate::ir::{TtBuilder, dense_i32, dense_i64};
 use crate::pass::mask::MaskState;
 use crate::pass::ofr::Ofr;
-use crate::pass::ptr_state::PtrState;
-use crate::ir::{dense_i32, dense_i64, TtBuilder};
 use crate::pass::ofr::OfrBuilder;
-use mlirpass::{Quiet, Rewriter};
+use crate::pass::ptr_state::PtrState;
 use crate::{Ir, Kind};
+use mlirpass::{Quiet, Rewriter};
 
 pub struct PtrAnalysis {
     pub gather_scatter: bool,
@@ -563,10 +563,12 @@ impl PtrAnalysis {
         if dims.is_empty() {
             return dims;
         }
-        let constant = s.int().or_else(|| s.value().and_then(|v| {
-            c.body.def_of(v, Kind::ArithConstant)?;
-            c.body.const_int(v).map(|x| x as i64)
-        }));
+        let constant = s.int().or_else(|| {
+            s.value().and_then(|v| {
+                c.body.def_of(v, Kind::ArithConstant)?;
+                c.body.const_int(v).map(|x| x as i64)
+            })
+        });
         if let Some(k) = constant {
             if k != 0 {
                 return dims;
@@ -623,7 +625,8 @@ impl PtrAnalysis {
                 let stride = to_i32(strides[dim], c);
                 let offset = c.binary(Kind::ArithDivui, offset, stride);
                 let gso = c.value(Kind::TensorSplat, &[offset], row_ty.clone());
-                let range = c.value_with(Kind::TtMakeRange, &[], &[("end", mlirformat::Attribute::of_int(i128::from(sizes[dim]), crate::ir::int(32))), ("start", mlirformat::Attribute::of_int(0, crate::ir::int(32)))], row_ty);
+                let range =
+                    c.value_with(Kind::TtMakeRange, &[], &[("end", mlirformat::Attribute::of_int(i128::from(sizes[dim]), crate::ir::int(32))), ("start", mlirformat::Attribute::of_int(0, crate::ir::int(32)))], row_ty);
                 let gso = c.binary(Kind::ArithAddi, gso, range);
                 PtrState::gather_scatter_op(c, base, gso, Some(um), dim, &sizes, &strides, &offsets)
             }

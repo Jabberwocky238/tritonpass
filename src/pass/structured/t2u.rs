@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mlirformat::{Error, Type};
 use mlirpass::{Body, Diagnostic, OpData, OpId, PassManager, Passes, Severity, ValueId, pass};
 
-use crate::ir::{dense_i32, int, integer, TtBuilder};
-use mlirpass::{Quiet, Rewriter};
+use crate::ir::{TtBuilder, dense_i32, int, integer};
 use crate::{Ir, Kind};
+use mlirpass::{Quiet, Rewriter};
 
 /// 选项同 triton-shared 的 `Passes.td`。
 #[pass("triton-to-unstructured", on = "builtin.module")]
