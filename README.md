@@ -33,6 +33,13 @@ passes.with(TritonPasses::add);        // every triton-* pass, by name
 then build a pipeline by name, e.g.
 `builtin.module(triton-to-structured, cse, canonicalize, triton-to-unstructured, triton-arith-to-linalg{pids-to-func-args=false pids-to-gpu=true}, structured-to-memref, triton-ptr-to-memref, reconcile-unrealized-casts)`.
 
+mlirpass's own verifier, which `verify-each` runs after every pass, checks only branches and affine ops, so IR whose types
+do not line up goes through silently. `tritonpass::verify` adds the type checks MLIR's verifiers make: the ODS `Same*`
+traits, `scf` region and `func` / `tt.func` return and call signatures, `tt.addptr`, `tt.load` / `tt.store`,
+`arith.select` and comparisons. Put `triton-verify` in a pipeline, or run each chunk through
+`tritonpass::run_chunk_verified`, which checks the input and the result the way `mlir-opt` does (the `opt` example and
+the tests do this).
+
 ## What is in it
 
 | part | what it is | ported from |

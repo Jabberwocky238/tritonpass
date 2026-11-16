@@ -92,6 +92,7 @@ impl TritonPasses {
             .register::<TritonPtrToMemref>()
             .register::<ConditionalFoldUnitDims>()
             .register::<LoopUnitStep>()
-            .register::<CarriedBuffersInPlace>();
+            .register::<CarriedBuffersInPlace>()
+            .register::<crate::Verify>();
     }
 }

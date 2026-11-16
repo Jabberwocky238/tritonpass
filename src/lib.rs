@@ -14,12 +14,14 @@ mod grid;
 mod ir;
 mod kind;
 mod pass;
+mod verify;
 
 pub use dialect::{TtDialect, TtgDialect, TtsDialect, load_triton, pointee};
 pub use grid::GridEncoding;
 pub use ir::{At, Build, DYNAMIC, Ir, TtBuilder, dense_i32, dense_i64, dense_values, float, float_kind, i64_attr, int, integer};
 pub use kind::{Kind, Namespace};
 pub use pass::*;
+pub use verify::{Verify, run_chunk_verified, verify};
 
 // ⚠ mlirpass-macros 的 #[pass] / #[patterns] 展开成 `crate::…`：在根上转出这几个名字。
 #[allow(unused_imports, reason = "给 mlirpass 的宏展开用")]

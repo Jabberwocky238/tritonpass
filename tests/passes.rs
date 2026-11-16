@@ -12,6 +12,8 @@
 //! 没登记的块不 exact 是退步；登记了的块变 exact（或已经没有这一块）是清单过时，删掉那一行；unsupported 一律不行。
 //! 三种都让测试失败。登记的都是有原因的分歧：参照是旧 LLVM 上的 C++ 输出（README 写明差在哪），或参照自己的毛病。
 //!
+//! tritonpass 一侧每块读入之后、跑完之后都过一遍 [`tritonpass::verify`]（参照的 MLIR 也在这两处查）：类型对不上算失败。
+//!
 //! `--nocapture` 印按组的计数；`FILTER=<子串>` 只跑一部分，`SHOW=1` 印每处不 exact 的第一行差异（`SHOW=full` 两边全文）。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use mlirpass::mlirformat::MlirOpt;
 use mlirpass::{Body, Ctx, Interfaces, Invocation, Passes};
-use tritonpass::{TritonPasses, TtInterfaces, load_triton};
+use tritonpass::{TritonPasses, TtInterfaces, load_triton, run_chunk_verified};
 
 #[derive(Default, Clone, Copy)]
 struct Tally {
@@ -173,7 +175,7 @@ fn passes() {
             seen.insert(key.clone());
             let want = if want.trim().is_empty() { String::new() } else { inv.print(&mut Body::parse(ctx, want).unwrap_or_else(|e| panic!("{key}: 参照的输出读不进：{e}"))) };
             let mark = if listed { "（已登记）" } else { "" };
-            let outcome = match inv.run_chunk(ctx, chunk) {
+            let outcome = match run_chunk_verified(&inv, ctx, chunk) {
                 Ok(got) if got == want => Outcome::Exact,
                 Err(_) if want.is_empty() => Outcome::Exact,
                 Ok(got) => {
