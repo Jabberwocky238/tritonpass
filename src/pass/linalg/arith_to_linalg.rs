@@ -568,14 +568,15 @@ impl Tt {
     }
 
     /// `CallConverter`：tt.call ⇒ func.call。被调函数要的参数比给的多（args 写法给它追加了 grid 参数）时，
-    /// 缺的那几个取所在函数入口块的最后几个参数。
+    /// 缺的那几个取所在函数入口块的最后几个参数。被调函数照 C++ 在最近的外层 module 里按根名字找
+    /// （`getRootReference` + `lookupSymbol`）：符号引用按原样留着引号（`@"a.b-c"`），`lookup_path` 去掉引号再找。
     #[convert("tt.call")]
     fn call(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
         let b = &*cr.rw.body;
         let mut args: Vec<ValueId> = o.iter().flatten().copied().collect();
         let callee = b[op].get("callee").cloned();
-        let name = match callee.as_ref() {
-            Some(Attribute::SymbolRef(path)) => path.first().map(|n| n.to_string()),
+        let root = match callee.as_ref() {
+            Some(Attribute::SymbolRef(path)) => path.first().cloned(),
             _ => None,
         };
         let parent = {
@@ -585,8 +586,15 @@ impl Tt {
             }
             at
         };
-        if let (Some(parent), Some(name)) = (parent, name)
-            && let Some(f) = b.find_symbol(b.root, &name).filter(|f| b.is(*f, Kind::TtFunc))
+        let module = {
+            let mut at = b.parent_op(op);
+            while let Some(p) = at.filter(|p| !b.is(*p, Kind::BuiltinModule)) {
+                at = b.parent_op(p);
+            }
+            at
+        };
+        if let (Some(parent), Some(module), Some(root)) = (parent, module, root)
+            && let Some(f) = b.lookup_path(module, &[root]).and_then(|fs| fs.last().copied()).filter(|f| b.is(*f, Kind::TtFunc))
             && let Some(Attribute::Type(Type::Function(ft))) = b[f].get("function_type")
         {
             let need = ft.inputs.len();
