@@ -641,7 +641,8 @@ impl PtrAnalysis {
         Some(new)
     }
 
-    /// tts.make_tptr 的 mixed strides / offsets / shape。
+    /// tts.make_tptr 的 mixed strides / offsets / shape。静态项照 C++ 的 `getMixedStrides` / `getMixedOffsets`（`getMixedValues`）
+    /// 是 i64 的整数属性，不是 index：物化成常量时是 `arith.constant … : i64`。
     fn mixed_tptr(b: &Body<'_>, op: OpId) -> (Vec<Ofr>, Vec<Ofr>, Vec<Ofr>) {
         let seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
         let ops = &b[op].operands;
@@ -650,7 +651,7 @@ impl PtrAnalysis {
             let dynv = &ops[at..at + n];
             at += n;
             let mut it = dynv.iter();
-            crate::ir::dense_values(b[op].get(name)).into_iter().map(|x| if x == crate::ir::DYNAMIC { Ofr::V(*it.next().expect("动态项")) } else { Ofr::idx(x) }).collect::<Vec<_>>()
+            crate::ir::dense_values(b[op].get(name)).into_iter().map(|x| if x == crate::ir::DYNAMIC { Ofr::V(*it.next().expect("动态项")) } else { Ofr::I(x, 64) }).collect::<Vec<_>>()
         };
         let s = mix("static_strides", seg.get(1).copied().unwrap_or(0) as usize);
         let o = mix("static_offsets", seg.get(2).copied().unwrap_or(0) as usize);
@@ -658,6 +659,7 @@ impl PtrAnalysis {
         (s, o, sh)
     }
 
+    /// tts.make_gather_scatter_tptr 的 mixed strides / offsets（静态项同样是 i64 的整数属性）。
     fn mixed_gs(b: &Body<'_>, op: OpId) -> (Vec<Ofr>, Vec<Ofr>) {
         let seg = crate::ir::dense_values(b[op].get("operandSegmentSizes"));
         let ops = &b[op].operands;
@@ -666,7 +668,7 @@ impl PtrAnalysis {
             let dynv = &ops[at..at + n];
             at += n;
             let mut it = dynv.iter();
-            crate::ir::dense_values(b[op].get(name)).into_iter().map(|x| if x == crate::ir::DYNAMIC { Ofr::V(*it.next().expect("动态项")) } else { Ofr::idx(x) }).collect::<Vec<_>>()
+            crate::ir::dense_values(b[op].get(name)).into_iter().map(|x| if x == crate::ir::DYNAMIC { Ofr::V(*it.next().expect("动态项")) } else { Ofr::I(x, 64) }).collect::<Vec<_>>()
         };
         let s = mix("static_strides", seg.get(2).copied().unwrap_or(0) as usize);
         let o = mix("static_offsets", seg.get(3).copied().unwrap_or(0) as usize);
