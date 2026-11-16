@@ -479,6 +479,11 @@ impl PtrAnalysis {
         if !self.visit(ptr, &mut st, &mut c) {
             return false;
         }
+        // C++ 在这里断言 `state.isBlockPtr()`：块指针来自函数实参、scf.if 等认不出来源的地方时状态只有基址（秩 0），
+        // 这条 tt.advance 不改写
+        if st.order.is_empty() {
+            return false;
+        }
         let increments = c.body[op].operands[1..].to_vec();
         let mut offsets = Vec::new();
         for ((inc, off), stride) in increments.iter().zip(st.offsets.clone()).zip(st.strides.clone()) {

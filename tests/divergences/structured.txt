@@ -1,0 +1,4 @@
+# 结构化访存分析（triton-to-structured / triton-to-unstructured）上参照自己的毛病：参照（dope-opt bca398e）在这些块上
+# 断言崩溃或过不了自己的校验器，tritonpass 照常给出正确的输出。一行一块：`<stem>#<块号>  <原因>`。
+
+regress__structured__advance_non_block_state.0#0                  参照断言 state.isBlockPtr() 崩溃；tritonpass 不改写这条 tt.advance
