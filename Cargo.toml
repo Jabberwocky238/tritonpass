@@ -27,6 +27,9 @@ doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# 代码照 MLIR 的 C++ 写法用短名字（b、c、op、l、r……），与这两条风格 lint 相冲
+many_single_char_names = "allow"
+similar_names = "allow"
 
 [profile.dev]
 debug = "line-tables-only"
