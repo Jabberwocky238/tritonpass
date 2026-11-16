@@ -301,12 +301,20 @@ impl Tt {
         true
     }
 
+    /// `FpToFpConverter`：变窄 ⇒ arith.truncf（就近舍入），否则 arith.extf。C++ 断言舍入方式不是 RTZ（向零）；
+    /// 向零的截断照转成 truncf 会悄悄改成就近舍入，这里报错、转换失败（扩宽是精确的，舍入方式不起作用，照常 extf）。
     #[convert("tt.fp_to_fp")]
     fn fp_to_fp(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let src = cr.rw.body[op].operands[0];
         let rt = L::rty(cr, op);
         let w = |t: &Type<'_>| t.element_type().bit_width().unwrap_or(0);
-        let k = if w(&L::ty(cr, src)) > w(&rt) { Kind::ArithTruncf } else { Kind::ArithExtf };
+        let narrowing = w(&L::ty(cr, src)) > w(&rt);
+        // RoundingMode：RTZ 是 0，RTNE 是 1
+        if narrowing && cr.rw.body.int_attr(op, "rounding") == Some(0) {
+            cr.rw.body.emit_error(op, "Rounding Towards Zero is not supported：tt.fp_to_fp 向零舍入（rtz）的截断转不成 arith.truncf");
+            return false;
+        }
+        let k = if narrowing { Kind::ArithTruncf } else { Kind::ArithExtf };
         let v = cr.op1(k.name(), &[src], rt);
         cr.replace_values(op, &[v]);
         true
@@ -1067,6 +1075,8 @@ impl TritonArithToLinalg {
         t.dialect("arith", dynamic());
         t.dialect("math", dynamic());
         t.legal_op("builtin.module").legal_op(Kind::TtFunc.name()).legal_op(Kind::TtReturn.name());
+        // tt.fp_to_fp 一律要转：转不了的（向零舍入的截断）让转换失败，不留在 IR 里（C++ 在这里断言）
+        t.illegal_op(Kind::TtFpToFp.name());
         if self.pids_to_func_args || self.pids_to_gpu {
             t.illegal_op(Kind::TtGetProgramId.name()).illegal_op(Kind::TtGetNumPrograms.name());
         }
