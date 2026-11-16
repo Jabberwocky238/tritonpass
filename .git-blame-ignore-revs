@@ -1,0 +1,5 @@
+# Formatting-only commits, skipped by `git blame` on GitHub and locally after
+# `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
+# style: add rustfmt.toml and format the code base
+1c16eb8c1f26270e1be4c184ff38a2f3b766dfe5
