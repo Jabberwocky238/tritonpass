@@ -40,7 +40,10 @@ impl OpInterfaces for TtInterfaces {
     }
 
     fn fold<'a>(&self, b: &mut Body<'a>, op: OpId, _: &[Option<Attribute<'a>>]) -> Fold<'a> {
-        TtCanon::fold(b, op).map_or(Fold::Failed, |f| Fold::Results(vec![f]))
+        if let Some(f) = TtCanon::fold(b, op) {
+            return Fold::Results(vec![f]);
+        }
+        if TtCanon::trans_of_trans(b, op) { Fold::InPlace } else { Fold::Failed }
     }
 
     fn materialize<'a>(&self, value: &Attribute<'a>, ty: &Type<'a>) -> Option<OpData<'a>> {
@@ -119,14 +122,34 @@ impl TtCanon {
                 let zero = crate::ir::float(kind, if f.is_negative() { -0.0 } else { 0.0 })?;
                 Self::attr(if matches!(res_ty, Type::Shaped(_)) { Const::splat(zero, res_ty) } else { Const::scalar(zero, res_ty) })
             }
-            // trans(x, 恒等次序) 且类型相同 ⇒ x
+            // `TransOp::fold`：trans(x, 恒等次序) 且类型相同 ⇒ x；源是 splat 常量 ⇒ 换形状的 splat。trans(trans) 原地改，见 `trans_of_trans`
             Kind::TtTrans => {
                 let order = dense_values(b[op].get("order"));
                 let src = b.opd(op, 0);
-                (order.iter().enumerate().all(|(i, o)| *o == i as i64) && *b.ty(src) == res_ty).then_some(Folded::Value(src))
+                if order.iter().enumerate().all(|(i, o)| *o == i as i64) && *b.ty(src) == res_ty {
+                    return Some(Folded::Value(src));
+                }
+                let c = Self::splat_const(b, src)?;
+                Self::attr(Const::splat(c.values[0], res_ty))
             }
             _ => None,
         }
+    }
+
+    /// `TransOp::fold` 的 trans(trans(x)) ⇒ trans(x)：原地把次序换成两次的合成（`applyPermutation(内层, 外层)`，第 i 维取内层的
+    /// 第 外层[i] 项）、操作数换成 x。改了就是 true。
+    fn trans_of_trans(b: &mut Body<'_>, op: OpId) -> bool {
+        if !b.is(op, Kind::TtTrans) {
+            return false;
+        }
+        let Some(inner) = b.def_of(b.opd(op, 0), Kind::TtTrans) else { return false };
+        let inner_order = dense_values(b[inner].get("order"));
+        let order: Option<Vec<i64>> = dense_values(b[op].get("order")).iter().map(|&o| usize::try_from(o).ok().and_then(|o| inner_order.get(o).copied())).collect();
+        let Some(order) = order else { return false };
+        let x = b.opd(inner, 0);
+        b[op].set("order", crate::ir::dense_i32(&order));
+        b.set_operand(op, 0, x);
+        true
     }
 }
 
