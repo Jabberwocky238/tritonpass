@@ -343,12 +343,20 @@ impl Tt {
 
     /// `FpToFpConverter`：变窄 ⇒ arith.truncf（就近舍入），否则 arith.extf。C++ 断言舍入方式不是 RTZ（向零）；
     /// 向零的截断照转成 truncf 会悄悄改成就近舍入，这里报错、转换失败（扩宽是精确的，舍入方式不起作用，照常 extf）。
+    /// 位宽相同的两种类型（f8E4M3FN ⇒ f8E5M2，Triton 的 fp8 互转就是这样）extf、truncf 都表达不了：C++ 照样建 extf，
+    /// 参照的验证器拒收，这里同样报错（类型完全相同的在这之前已经折掉）。
     #[convert("tt.fp_to_fp")]
     fn fp_to_fp(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let src = cr.rw.body[op].operands[0];
         let rt = L::rty(cr, op);
+        let st = L::ty(cr, src);
         let w = |t: &Type<'_>| t.element_type().bit_width().unwrap_or(0);
-        let narrowing = w(&L::ty(cr, src)) > w(&rt);
+        if w(&st) == w(&rt) && st.element_type() != rt.element_type() {
+            let msg = format!("tt.fp_to_fp：{} ⇒ {} 位宽相同，arith.extf、arith.truncf 都表达不了", st.element_type(), rt.element_type());
+            cr.rw.body.emit_error(op, msg);
+            return false;
+        }
+        let narrowing = w(&st) > w(&rt);
         // RoundingMode：RTZ 是 0，RTNE 是 1
         if narrowing && cr.rw.body.int_attr(op, "rounding") == Some(0) {
             cr.rw.body.emit_error(op, "Rounding Towards Zero is not supported：tt.fp_to_fp 向零舍入（rtz）的截断转不成 arith.truncf");
