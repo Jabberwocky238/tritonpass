@@ -17,6 +17,7 @@ pub fn pointee(ty: &Type<'_>) -> Type<'static> {
     }
     let inner = match (&e.body, e.params.first()) {
         (_, Some(Attribute::Type(t))) => t.owned(),
+        #[expect(clippy::redundant_closure_for_method_calls, reason = "换成 `Parser::ty` 编不过：`Parser::read` 要的闭包对 Parser 的第二个生命周期是高阶的")]
         (Some(body), _) => {
             let body = body.trim();
             let text = body.strip_prefix('<').and_then(|b| b.strip_suffix('>')).unwrap_or(body);
@@ -54,8 +55,8 @@ fn empty_i32_array() -> Attribute<'static> {
 }
 
 /// 自定义形式里印不印这个缺省值属性：等于缺省值的不印（`printOptionalAttrDict` 跳过取缺省值的 property）。
-fn non_default<'x, 'a>(v: &'x Option<Attribute<'a>>, default: &Attribute<'_>) -> Option<&'x Attribute<'a>> {
-    v.as_ref().filter(|a| a.owned() != default.owned())
+fn non_default<'x, 'a>(v: Option<&'x Attribute<'a>>, default: &Attribute<'_>) -> Option<&'x Attribute<'a>> {
+    v.filter(|a| a.owned() != default.owned())
 }
 
 /// `%a, %b`
@@ -97,7 +98,7 @@ fn print_cache_evict(p: &mut Printer<'_, '_>, cache: Option<CacheModifier>, evic
 }
 
 /// attr-dict 里写着的固有属性（`{cache = 1 : i32}`）取出来：MLIR 读入时按名字搬进 property。
-fn take_attr<'a>(attrs: &mut Vec<NamedAttr<'a>>, name: &str) -> Option<Attribute<'static>> {
+fn take_attr(attrs: &mut Vec<NamedAttr<'_>>, name: &str) -> Option<Attribute<'static>> {
     let i = attrs.iter().position(|a| a.name == name)?;
     attrs.remove(i).value.map(|v| v.owned())
 }
@@ -144,7 +145,7 @@ pub struct FuncOp<'a> {
 }
 
 impl<'a> FuncOp<'a> {
-    fn nth<'x>(attrs: &'x Option<Attribute<'a>>, i: usize) -> Option<&'x Attribute<'a>> {
+    fn nth<'x>(attrs: Option<&'x Attribute<'a>>, i: usize) -> Option<&'x Attribute<'a>> {
         match attrs {
             Some(Attribute::Array(ds)) => ds.get(i).filter(|d| !matches!(d, Attribute::Dict(xs) if xs.is_empty())),
             _ => None,
@@ -174,7 +175,7 @@ impl Print for FuncOp<'_> {
                 Some(a) => write!(p, "%{}: {t}", a.name)?,
                 None => write!(p, "{t}")?,
             }
-            if let Some(d) = Self::nth(&self.arg_attrs, i) {
+            if let Some(d) = Self::nth(self.arg_attrs.as_ref(), i) {
                 write!(p, " {d}")?;
             }
             p.loc(&arg.and_then(|a| a.loc.clone()))?;
@@ -182,12 +183,12 @@ impl Print for FuncOp<'_> {
         p.write_char(')')?;
         match ty.results.as_slice() {
             [] => {}
-            [t] if Self::nth(&self.res_attrs, 0).is_none() && !matches!(t, Type::Function(_)) => write!(p, " -> {t}")?,
+            [t] if Self::nth(self.res_attrs.as_ref(), 0).is_none() && !matches!(t, Type::Function(_)) => write!(p, " -> {t}")?,
             ts => {
                 p.write_str(" -> (")?;
                 for (i, t) in ts.iter().enumerate() {
                     write!(p, "{}{t}", if i > 0 { ", " } else { "" })?;
-                    if let Some(d) = Self::nth(&self.res_attrs, i) {
+                    if let Some(d) = Self::nth(self.res_attrs.as_ref(), i) {
                         write!(p, " {d}")?;
                     }
                 }
@@ -306,13 +307,13 @@ impl Print for LoadOp<'_> {
         }
         print_cache_evict(p, self.cache, self.evict)?;
         let mut attrs = self.attrs.clone();
-        if let Some(b) = non_default(&self.boundary_check, &empty_i32_array()) {
+        if let Some(b) = non_default(self.boundary_check.as_ref(), &empty_i32_array()) {
             attrs.push(NamedAttr::of("boundaryCheck", b.owned()));
         }
         if let Some(pad) = &self.padding {
             attrs.push(NamedAttr::of("padding", pad.owned()));
         }
-        if let Some(v) = non_default(&self.is_volatile, &Attribute::Bool(false)) {
+        if let Some(v) = non_default(self.is_volatile.as_ref(), &Attribute::Bool(false)) {
             attrs.push(NamedAttr::of("isVolatile", v.owned()));
         }
         attrs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -391,7 +392,7 @@ impl Print for StoreOp<'_> {
         }
         print_cache_evict(p, self.cache, self.evict)?;
         let mut attrs = self.attrs.clone();
-        if let Some(b) = non_default(&self.boundary_check, &empty_i32_array()) {
+        if let Some(b) = non_default(self.boundary_check.as_ref(), &empty_i32_array()) {
             attrs.push(NamedAttr::of("boundaryCheck", b.owned()));
         }
         attrs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -869,7 +870,7 @@ impl Print for DotOp<'_> {
         }
         let mut attrs = self.attrs.clone();
         let zero = Attribute::of_int(0, Type::Integer { signedness: mlirformat::Signedness::Signless, width: 32 });
-        if let Some(m) = non_default(&self.max_num_imprecise_acc, &zero) {
+        if let Some(m) = non_default(self.max_num_imprecise_acc.as_ref(), &zero) {
             attrs.push(NamedAttr::of("maxNumImpreciseAcc", m.owned()));
         }
         attrs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -989,6 +990,7 @@ impl Parse for MakeTensorPtrOp<'_> {
         // base 是指向块张量元素的指针：`!tt.ptr<元素>`
         let elem = pointee(&result).element_type().owned();
         let text = format!("!tt.ptr<{elem}>");
+        #[expect(clippy::redundant_closure_for_method_calls, reason = "换成 `Parser::ty` 编不过：`Parser::read` 要的闭包对 Parser 的第二个生命周期是高阶的")]
         let base_ty = Parser::read(&text, |q| q.ty()).map(|t| t.owned()).or_else(|e| p.err(format!("{e}")))?;
         let op = MakeTensorPtrOp { base, rest, order, base_ty, rest_ty, result, attrs, loc: p.opt_loc()? };
         Self::owned(op, p)

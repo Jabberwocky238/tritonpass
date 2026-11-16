@@ -13,6 +13,7 @@ use crate::{Ir, Kind, pointee};
 
 /// 选项同 triton-shared 的 `Passes.td`，名字与缺省值一样（dope-opt 的产品流水线另传 `enable-modulo-support=false`）。
 #[pass("triton-to-structured", on = "builtin.module")]
+#[expect(clippy::struct_excessive_bools, reason = "选项照 triton-shared 的 `Passes.td`")]
 pub struct TritonToStructured {
     /// 认不出结构的读写改用 `tts.make_gather_scatter_tptr`
     #[opt("enable-make-gather-scatter", default = true)]
@@ -32,7 +33,7 @@ pub struct TritonToStructured {
 }
 
 impl mlirpass::Run for TritonToStructured {
-    fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
+    fn run(&self, body: &mut Body<'_>, op: OpId) -> Result<(), Error> {
         if self.unsafe_mask {
             body.emit_error(op, "triton-to-structured：use-unsafe-mask 还没移植");
             return Err(Error::from("triton-to-structured：use-unsafe-mask 还没移植"));

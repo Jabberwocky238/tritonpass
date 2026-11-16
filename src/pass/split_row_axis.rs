@@ -79,6 +79,7 @@ impl Splitter<'_, '_, '_> {
         self.c.scalar(integer(w, i128::from(v)), ty)
     }
 
+    #[expect(clippy::wrong_self_convention, reason = "名字照 C++ 的 `toI64`")]
     fn to_i64(&mut self, s: ValueId) -> ValueId {
         match self.c.body.ty(s) {
             Type::Integer { width: 64, .. } => s,
@@ -160,10 +161,9 @@ impl Splitter<'_, '_, '_> {
                 let (l, x) = (l?, x?);
                 let (pure, mut other) = if let Some(s) = self.pure_scalar(&l) {
                     (s, x)
-                } else if let Some(s) = self.pure_scalar(&x) {
-                    (s, l)
                 } else {
-                    return None;
+                    let s = self.pure_scalar(&x)?;
+                    (s, l)
                 };
                 for t in &mut other {
                     t.scale = Some(match t.scale {
@@ -370,7 +370,9 @@ impl Splitter<'_, '_, '_> {
         }
         let (slt, sle, sgt, sge) = (CmpIPredicate::slt as i128, CmpIPredicate::sle as i128, CmpIPredicate::sgt as i128, CmpIPredicate::sge as i128);
         if pred == sgt || pred == sge {
-            diff.iter_mut().for_each(|t| t.sign = -t.sign);
+            for t in &mut diff {
+                t.sign = -t.sign;
+            }
             pred = if pred == sgt { slt } else { sle };
         }
         if pred != slt && pred != sle {

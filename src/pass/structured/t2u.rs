@@ -20,7 +20,7 @@ pub struct TritonToUnstructured {
 }
 
 impl mlirpass::Run for TritonToUnstructured {
-    fn run<'a>(&self, body: &mut Body<'a>, op: OpId) -> Result<(), Error> {
+    fn run(&self, body: &mut Body<'_>, op: OpId) -> Result<(), Error> {
         if !(Unstructured { bits: self.offset_bits, ..Unstructured::default() }).process(body, op) {
             let d = Diagnostic::at(body, op, Severity::Warning, "Cannot transform tensor of pointers into a single base pointer with tensor of offsets");
             body.report(d);
@@ -87,6 +87,7 @@ impl Unstructured {
         });
         for f in funcs {
             let entry = b.entry(f, 0);
+            #[expect(clippy::unnecessary_to_owned, reason = "循环里要改 body：先拷一份入口实参")]
             for a in b[entry].args.to_vec() {
                 if !Self::ptr_like(b.ty(a)) {
                     continue;

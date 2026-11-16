@@ -289,6 +289,7 @@ impl PtrState {
     }
 
     /// `MakeGatherScatterTensorPtrOp::build`。
+    #[expect(clippy::too_many_arguments, reason = "参数照 C++ 的 `MakeGatherScatterTensorPtrOp::build`")]
     pub fn gather_scatter_op(c: &mut Rewriter<'_, '_>, base: ValueId, off: ValueId, mask: Option<ValueId>, dim: usize, sizes: &[i64], strides: &[Ofr], offsets: &[Ofr]) -> ValueId {
         let (mut st_off, mut dyn_off) = (Vec::new(), Vec::new());
         for (i, o) in offsets.iter().enumerate() {

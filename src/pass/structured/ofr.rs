@@ -253,7 +253,7 @@ impl<'a, L: mlirpass::Listener<'a> + ?Sized> OfrBuilder for mlirpass::Rewriter<'
         let shaped = matches!(ty, Type::Shaped(_));
         if tshaped && !shaped {
             let te = tty.element_type().owned();
-            let v = if te != ty { self.index_type_cast(v, &te) } else { v };
+            let v = if te == ty { v } else { self.index_type_cast(v, &te) };
             return Ofr::V(self.value(Kind::TtSplat, &[v], tty));
         }
         if tshaped && shaped {

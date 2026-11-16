@@ -6,6 +6,7 @@
 //!   2. `remsi(x, splat c)`，条件同上 ⇒ `arange(start mod c, start mod c + (end - start))`；
 //!   3. `arange` 与常量的比较每格结果一样 ⇒ 全真或全假的常量张量；
 //!   4. `addptr(splat p, splat s)` 的无 mask 读 ⇒ `splat(load(addptr(p, s)))`。
+//!
 //! 改写过就跑一遍 canonicalize（折掉留下的常量 select、取反）；什么都没改就不碰 IR。
 use mlirformat::arith::CmpIPredicate;
 use mlirformat::{Attribute, Error, Type};

@@ -15,7 +15,7 @@ use crate::{Ir, Kind};
 pub struct TtInterfaces;
 
 impl OpInterfaces for TtInterfaces {
-    fn namespace(&self) -> &str {
+    fn namespace(&self) -> &'static str {
         "tt"
     }
 
@@ -47,8 +47,8 @@ impl OpInterfaces for TtInterfaces {
     }
 
     fn materialize<'a>(&self, value: &Attribute<'a>, ty: &Type<'a>) -> Option<OpData<'a>> {
-        Some(OpData::build(Kind::ArithConstant.name()).with("value", value.clone()))
-            .filter(|_| matches!(value, Attribute::Int { .. } | Attribute::Float { .. } | Attribute::Bool(_) | Attribute::Builtin { .. }) && !matches!(ty, Type::Extended(_)))
+        (matches!(value, Attribute::Int { .. } | Attribute::Float { .. } | Attribute::Bool(_) | Attribute::Builtin { .. }) && !matches!(ty, Type::Extended(_)))
+            .then_some(OpData::build(Kind::ArithConstant.name()).with("value", value.clone()))
     }
 
     fn canonicalization_patterns(&self, s: &mut PatternSet) {
@@ -66,8 +66,8 @@ impl TtCanon {
         b.constant(v).filter(|c| c.elements && c.values.windows(2).all(|w| w[0] == w[1]))
     }
 
-    fn attr<'a>(c: Const<'a>) -> Option<Folded<'a>> {
-        Some(Folded::Attr(c.into()))
+    fn attr(c: Const<'_>) -> Folded<'_> {
+        Folded::Attr(c.into())
     }
 
     /// 一个 tt op 的 fold：折成常量或一个已有的值。
@@ -78,7 +78,7 @@ impl TtCanon {
             // splat(常量标量) ⇒ splat 常量
             Kind::TtSplat => {
                 let c = b.constant(b.opd(op, 0)).filter(|c| !c.elements)?;
-                Self::attr(Const::splat(c.values[0], res_ty))
+                Some(Self::attr(Const::splat(c.values[0], res_ty)))
             }
             // make_range(s, s + 1) ⇒ splat(s)
             Kind::TtMakeRange => {
@@ -93,7 +93,7 @@ impl TtCanon {
                 }
                 let c = b.constant(src).filter(|c| c.elements)?;
                 let splat = c.values.windows(2).all(|w| w[0] == w[1]);
-                Self::attr(if splat { Const::splat(c.values[0], res_ty) } else { Const { ty: res_ty, values: c.values, elements: true } })
+                Some(Self::attr(if splat { Const::splat(c.values[0], res_ty) } else { Const { ty: res_ty, values: c.values, elements: true } }))
             }
             // broadcast 到同类型 ⇒ 源；splat 常量源 ⇒ 换形状
             Kind::TtBroadcast => {
@@ -102,7 +102,7 @@ impl TtCanon {
                     return Some(Folded::Value(src));
                 }
                 let c = Self::splat_const(b, src)?;
-                Self::attr(Const::splat(c.values[0], res_ty))
+                Some(Self::attr(Const::splat(c.values[0], res_ty)))
             }
             // addptr(p, 0) ⇒ p
             Kind::TtAddptr => (b.const_int(b.opd(op, 1)) == Some(0)).then(|| Folded::Value(b.opd(op, 0))),
@@ -122,7 +122,7 @@ impl TtCanon {
                 let kind = crate::ir::float_kind(&res_ty)?;
                 // 没有布局的浮点（f8E4M3FNUZ 一类）建不出常量：不折（C++ 折成 +0）
                 let zero = crate::ir::float(kind, if f.is_negative() { -0.0 } else { 0.0 })?;
-                Self::attr(if matches!(res_ty, Type::Shaped(_)) { Const::splat(zero, res_ty) } else { Const::scalar(zero, res_ty) })
+                Some(Self::attr(if matches!(res_ty, Type::Shaped(_)) { Const::splat(zero, res_ty) } else { Const::scalar(zero, res_ty) }))
             }
             // `TransOp::fold`：trans(x, 恒等次序) 且类型相同 ⇒ x；源是 splat 常量 ⇒ 换形状的 splat。trans(trans) 原地改，见 `trans_of_trans`
             Kind::TtTrans => {
@@ -132,7 +132,7 @@ impl TtCanon {
                     return Some(Folded::Value(src));
                 }
                 let c = Self::splat_const(b, src)?;
-                Self::attr(Const::splat(c.values[0], res_ty))
+                Some(Self::attr(Const::splat(c.values[0], res_ty)))
             }
             _ => None,
         }

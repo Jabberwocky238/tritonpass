@@ -109,15 +109,7 @@ impl PtrAnalysis {
             };
             return match c.body.kind(d) {
                 Some(Kind::TtAddptr) => self.visit_addptr(d, s, c),
-                Some(Kind::TtBitcast) => {
-                    s.source = Some(v);
-                    true
-                }
-                Some(Kind::TtIntToPtr) => {
-                    s.source = Some(v);
-                    true
-                }
-                Some(Kind::ScfIf) => {
+                Some(Kind::TtBitcast | Kind::TtIntToPtr | Kind::ScfIf) => {
                     s.source = Some(v);
                     true
                 }

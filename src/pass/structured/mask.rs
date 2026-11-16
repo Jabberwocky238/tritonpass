@@ -194,13 +194,12 @@ impl MaskState {
                 return false;
             }
             let shape = ty.dims().unwrap_or_default();
-            for i in 0..l.masks.len() {
+            for (i, &size) in shape.iter().enumerate() {
                 let (mut lm, mut rm) = (l.masks[i], r.masks[i]);
                 if lm.is_none() && rm.is_none() {
                     self.masks.push(None);
                     continue;
                 }
-                let size = shape[i];
                 let mat = |s: &Self| if s.is_mask() { s.dims.get(i).copied() } else { s.scalar };
                 if lm.is_none() {
                     let Some(o) = mat(&l) else { return false };
@@ -274,11 +273,8 @@ impl MaskState {
         if pw != sw {
             return false;
         }
-        loop {
-            match b.def_op(x).and_then(|d| b.kind(d)) {
-                Some(Kind::ArithExtsi | Kind::TtExpandDims | Kind::TtBroadcast) => x = b.opd(b.def_op(x).expect("有"), 0),
-                _ => break,
-            }
+        while let Some(Kind::ArithExtsi | Kind::TtExpandDims | Kind::TtBroadcast) = b.def_op(x).and_then(|d| b.kind(d)) {
+            x = b.opd(b.def_op(x).expect("有"), 0);
         }
         let Some(r) = b.def_of(x, Kind::TtMakeRange) else { return false };
         let (s, e) = (b.int_attr(r, "start").unwrap_or(0), b.int_attr(r, "end").unwrap_or(0));
@@ -444,7 +440,7 @@ impl MaskState {
             self.scalar = Some(Ofr::V(offset));
             return true;
         }
-        self.dims = lhs.dims.clone();
+        self.dims.clone_from(&lhs.dims);
         let (Some(st), Some(en)) = (lhs.start, lhs.end) else { return false };
         let dist = c.sub_ofr(en, st);
         self.start = Some(Ofr::V(offset));
