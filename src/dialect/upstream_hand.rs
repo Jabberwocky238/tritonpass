@@ -88,7 +88,8 @@ impl Parse for WhileOp<'_> {
     }
 }
 
-/// `llvm.intr.assume %c : i1`（不带 op bundle 的写法；带 bundle 的走通用形式）。
+/// `llvm.intr.assume %c : i1 {…}`（不带 op bundle 的写法；带 bundle 的走通用形式）。attr-dict 在类型之后，照上游的
+/// `$cond (…)? `:` type($cond) attr-dict`。
 #[mlir::op("llvm.intr.assume", custom)]
 pub struct AssumeOp<'a> {
     #[slot(cond_ty)]
@@ -108,9 +109,8 @@ impl Print for AssumeOp<'_> {
             return self.print_generic(p);
         }
         p.op_name(Self::NAME)?;
-        write!(p, " {}", self.cond)?;
+        write!(p, " {} : {}", self.cond, self.cond_ty)?;
         p.attr_dict("", &self.attrs, &[])?;
-        write!(p, " : {}", self.cond_ty)?;
         p.loc(&self.loc)
     }
 }
@@ -118,9 +118,9 @@ impl Print for AssumeOp<'_> {
 impl Parse for AssumeOp<'_> {
     fn parse(p: &mut Parser<'_, '_>) -> R<Self> {
         let cond = p.value()?;
-        let attrs = p.opt_dict()?;
         p.expect(":")?;
         let cond_ty = p.ty()?;
+        let attrs = p.opt_dict()?;
         let sizes = Attribute::DenseArray { ty: Type::Integer { signedness: mlirformat::Signedness::Signless, width: 32 }, values: Vec::new().into() };
         let op = AssumeOp { cond, op_bundle_operands: Vec::new(), op_bundle_sizes: sizes, op_bundle_tags: None, cond_ty, op_bundle_operands_ty: Vec::new(), attrs, loc: p.opt_loc()? };
         Self::owned(op, p)
