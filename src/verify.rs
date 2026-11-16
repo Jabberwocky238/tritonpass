@@ -28,8 +28,15 @@ pub fn verify(body: &Body<'_>, root: OpId) -> Result<(), Error> {
     out
 }
 
+/// [`run_chunk_verified`] 跑成的一块：印出的 IR，与 pass 报的诊断（成功时的警告等；失败时诊断都在错误里）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChunkOutput {
+    pub text: String,
+    pub diagnostics: Vec<String>,
+}
+
 /// `Invocation::run_chunk` 加上类型检查：读入之后查一遍输入，跑完流水线查一遍结果（`--verify-each=false` 时都不查，同 MLIR）。
-pub fn run_chunk_verified(inv: &Invocation, ctx: Ctx<'_>, chunk: &str) -> Result<String, Error> {
+pub fn run_chunk_verified(inv: &Invocation, ctx: Ctx<'_>, chunk: &str) -> Result<ChunkOutput, Error> {
     let mut body = inv.read(ctx, chunk)?;
     let root = body.root;
     let check = inv.pipeline.verify_each;
@@ -48,7 +55,8 @@ pub fn run_chunk_verified(inv: &Invocation, ctx: Ctx<'_>, chunk: &str) -> Result
     if check {
         verify(&body, root)?;
     }
-    Ok(inv.print(&mut body))
+    let diagnostics = body.take_diagnostics().iter().map(ToString::to_string).collect();
+    Ok(ChunkOutput { text: inv.print(&mut body), diagnostics })
 }
 
 /// 流水线里的类型检查：`builtin.module(…, triton-verify)`。

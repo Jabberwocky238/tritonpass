@@ -38,10 +38,15 @@ fn main() -> std::process::ExitCode {
         }
     };
     let ctx = Ctx::new(&opt, &interfaces);
-    let outs: Result<Vec<String>, _> = inv.chunks(&src).into_iter().map(|c| run_chunk_verified(&inv, ctx, c)).collect();
+    let outs: Result<Vec<_>, _> = inv.chunks(&src).into_iter().map(|c| run_chunk_verified(&inv, ctx, c)).collect();
     match outs {
         Ok(outs) => {
-            print!("{}", outs.join(&format!("{SPLIT_MARKER}\n")));
+            // pass 报的警告等印到 stderr（同 mlir-opt），IR 印到 stdout
+            for d in outs.iter().flat_map(|o| &o.diagnostics) {
+                eprintln!("{d}");
+            }
+            let texts: Vec<&str> = outs.iter().map(|o| o.text.as_str()).collect();
+            print!("{}", texts.join(&format!("{SPLIT_MARKER}\n")));
             std::process::ExitCode::SUCCESS
         }
         Err(e) => {

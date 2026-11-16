@@ -175,7 +175,7 @@ fn passes() {
             seen.insert(key.clone());
             let want = if want.trim().is_empty() { String::new() } else { inv.print(&mut Body::parse(ctx, want).unwrap_or_else(|e| panic!("{key}: 参照的输出读不进：{e}"))) };
             let mark = if listed { "（已登记）" } else { "" };
-            let outcome = match run_chunk_verified(&inv, ctx, chunk) {
+            let outcome = match run_chunk_verified(&inv, ctx, chunk).map(|o| o.text) {
                 Ok(got) if got == want => Outcome::Exact,
                 Err(_) if want.is_empty() => Outcome::Exact,
                 Ok(got) => {
