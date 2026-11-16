@@ -1177,13 +1177,15 @@ impl TritonArithToLinalg {
         }
     }
 
-    /// tt.func ⇒ func.func，tt.return ⇒ func.return。
+    /// tt.func ⇒ func.func，tt.return ⇒ func.return。照 C++（`moduleOp.walk`）整个 module 里的都换，嵌套 module 里的也算。
     fn to_func<'a>(b: &mut Body<'a>, module: OpId) {
-        let top = b.top_block(module);
-        for f in b.block_ops(top) {
-            if !b.is(f, Kind::TtFunc) {
-                continue;
+        let mut funcs = Vec::new();
+        b.walk_post(module, &mut |o| {
+            if b.is(o, Kind::TtFunc) {
+                funcs.push(o);
             }
+        });
+        for f in funcs {
             let mut d: OpData<'a> = OpData::named(Kind::FuncFunc.name());
             for name in ["function_type", "sym_name"] {
                 if let Some(a) = b[f].get(name) {
