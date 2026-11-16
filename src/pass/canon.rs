@@ -3,7 +3,8 @@
 //!   `TransOp::fold`；常量的物化照 `TritonDialect::materializeConstant`（`arith.constant`）；
 //! - 规范化模式：`CanonicalizeMaskedLoadPattern`、`…StorePattern`、`BroadcastSplatPattern`、`BroadcastBroadcastPattern`、
 //!   `ReshapeOp::canonicalize`；
-//! - 内存效应：`tt.load` 读 GlobalMemory（volatile 另有写），没有用处的读是平凡死的。
+//! - 内存效应：`tt.load` 读 GlobalMemory（volatile 另有写），没有用处的读是平凡死的；`tt.extern_elementwise`、
+//!   `tt.elementwise_inline_asm` 是 pure 的没有效应、可推测执行，否则读写。
 use mlirformat::{Attribute, Const, Scalar, Type};
 use mlirpass::{Body, EffectInstance, EffectKind, Fold, Folded, OpData, OpId, OpInterfaces, PatternSet, Rewriter, ValueId};
 
@@ -19,14 +20,23 @@ impl OpInterfaces for TtInterfaces {
     }
 
     fn effects(&self, b: &Body<'_>, op: OpId) -> Option<Vec<EffectInstance>> {
-        if !b.is(op, Kind::TtLoad) {
-            return None;
+        match b.kind(op)? {
+            Kind::TtLoad => {
+                let mut e = vec![EffectInstance { kind: EffectKind::Read, value: Some(b.opd(op, 0)), resource: "GlobalMemory".into() }];
+                if matches!(b[op].get("isVolatile"), Some(Attribute::Bool(true))) {
+                    e.push(EffectInstance::on(EffectKind::Write, None));
+                }
+                Some(e)
+            }
+            // `ExternElementwiseOp` / `ElementwiseInlineAsmOp::getEffects`：pure 的没有效应，否则写、读 DefaultResource
+            Kind::TtExternElementwise | Kind::TtElementwiseInlineAsm => Some(if pure(b, op) { Vec::new() } else { vec![EffectInstance::on(EffectKind::Write, None), EffectInstance::on(EffectKind::Read, None)] }),
+            _ => None,
         }
-        let mut e = vec![EffectInstance { kind: EffectKind::Read, value: Some(b.opd(op, 0)), resource: "GlobalMemory".into() }];
-        if matches!(b[op].get("isVolatile"), Some(Attribute::Bool(true))) {
-            e.push(EffectInstance::on(EffectKind::Write, None));
-        }
-        Some(e)
+    }
+
+    /// `ExternElementwiseOp` / `ElementwiseInlineAsmOp::getSpeculatability`：pure 的可推测执行（`Some(false)`），否则不可（`None`）。
+    fn speculatability(&self, b: &Body<'_>, op: OpId) -> Option<bool> {
+        (matches!(b.kind(op), Some(Kind::TtExternElementwise | Kind::TtElementwiseInlineAsm)) && pure(b, op)).then_some(false)
     }
 
     fn fold<'a>(&self, b: &mut Body<'a>, op: OpId, _: &[Option<Attribute<'a>>]) -> Fold<'a> {
@@ -118,6 +128,11 @@ impl TtCanon {
             _ => None,
         }
     }
+}
+
+/// extern_elementwise / elementwise_inline_asm 的 `pure`。
+fn pure(b: &Body<'_>, op: OpId) -> bool {
+    matches!(b[op].get("pure"), Some(Attribute::Bool(true)))
 }
 
 /// splat 常量 i1 掩码的值。
