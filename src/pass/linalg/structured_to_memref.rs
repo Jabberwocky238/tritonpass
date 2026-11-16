@@ -389,14 +389,16 @@ impl GatherScatter {
         Mem::create(cr, OpData::build(Kind::ArithConstant.name()).with("value", Attribute::index(v)), Type::Index)
     }
 
-    /// 偏移转成 index、循环上界（mask 收窄）、空循环与（有非结构化 mask 时）其中的 scf.if；插入点留在体的开头（或 then 里）。
-    /// 返回（循环，0，1，归纳变量，偏移张量，各维尺寸）。
-    #[expect(clippy::type_complexity, reason = "几样一起交出")]
-    fn begin(&self, cr: &mut Cr<'_, '_, '_>, mask: Option<Vec<Ofr>>) -> (OpId, ValueId, ValueId, ValueId, ValueId, Vec<Ofr>) {
-        let ot = cr.rw.body.ty(self.offset).clone();
-        let oshape = ot.dims().unwrap_or_default();
-        let mut size = oshape[0];
-        let offset = Mem::create(cr, OpData::build(Kind::ArithIndexCast.name()).operands(&[self.offset]), Type::tensor(&oshape, Type::Index));
+    /// 偏移张量转成 index：C++ 在 rewriteGather / rewriteScatter 的最前面做（读的话在建 alloc 之前）。
+    fn index_offsets(&self, cr: &mut Cr<'_, '_, '_>) -> ValueId {
+        let oshape = cr.rw.body.ty(self.offset).dims().unwrap_or_default();
+        Mem::create(cr, OpData::build(Kind::ArithIndexCast.name()).operands(&[self.offset]), Type::tensor(&oshape, Type::Index))
+    }
+
+    /// 循环上界（mask 收窄）、空循环与（有非结构化 mask 时）其中的 scf.if；插入点留在体的开头（或 then 里）。
+    /// 返回（循环，0，1，归纳变量，各维尺寸）。
+    fn begin(&self, cr: &mut Cr<'_, '_, '_>, mask: Option<Vec<Ofr>>) -> (OpId, ValueId, ValueId, ValueId, Vec<Ofr>) {
+        let mut size = cr.rw.body.ty(self.offset).dims().unwrap_or_default()[0];
         let mut sizes: Vec<Ofr> = self.sizes.iter().map(|s| Ofr::idx(*s)).collect();
         sizes[self.dim] = Ofr::idx(1);
         let lb = Self::index(cr, 0);
@@ -422,7 +424,7 @@ impl GatherScatter {
             let y = b.create(OpData::build(Kind::ScfYield.name()), &[]);
             b.insert(y, blk, None);
         });
-        (l, lb, step, cr.rw.body[cr.rw.body.top_block(l)].args[0], offset, sizes)
+        (l, lb, step, cr.rw.body[cr.rw.body.top_block(l)].args[0], sizes)
     }
 
     /// 插入点移进循环体（有非结构化 mask 时再进 `scf.if` 的 then）。
@@ -453,11 +455,12 @@ impl GatherScatter {
         let mask = NoTc::mask(b, op, true);
         let other = NoTc::other(b, op);
         let atype = Mem::memref(&shape, elem, None);
+        let offset = self.index_offsets(cr);
         let alloc = Mem::create(cr, OpData::build(Kind::MemrefAlloc.name()).with("operandSegmentSizes", dense_i32(&[0, 0])), atype.clone());
         if let Some(x) = other {
             NoTc::fill(cr, x, alloc);
         }
-        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, mask.clone());
+        let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.clone());
         let tv = Mem::create(cr, OpData::build(Kind::BufferizationToTensor.name()).operands(&[alloc]).with("restrict", Attribute::Unit).with("writable", Attribute::Unit), rt);
         cr.replace_values(op, &[tv]);
         self.enter(cr, l, iv);
@@ -482,7 +485,8 @@ impl GatherScatter {
     /// `StoreConverter::rewriteScatter`。
     fn store(&self, cr: &mut Cr<'_, '_, '_>, op: OpId, memref: ValueId, value: ValueId) -> bool {
         let mask = NoTc::mask(cr.rw.body, op, false);
-        let (l, lb, step, iv, offset, mut sizes) = self.begin(cr, mask.clone());
+        let offset = self.index_offsets(cr);
+        let (l, lb, step, iv, mut sizes) = self.begin(cr, mask.clone());
         let _ = l;
         self.enter(cr, l, iv);
         let elt = Mem::create(cr, OpData::build(Kind::TensorExtract.name()).operands(&[offset, iv]), Type::Index);
