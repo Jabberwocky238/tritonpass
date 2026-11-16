@@ -2,6 +2,8 @@
 name = "tritonpass"
 version = "0.2.0"
 edition = "2024"
+# 依赖 mlirformat 0.8 用了 `if let` 守卫（1.95 稳定）：1.94 编不过，1.95 可以
+rust-version = "1.95"
 description = "Triton TTIR to block-level standard MLIR (func / arith / math / scf / memref / linalg) on the mlirformat / mlirpass stack"
 license = "MIT"
 repository = "https://github.com/Jabberwocky238/tritonpass"
