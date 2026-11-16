@@ -57,18 +57,20 @@ struct Prepass;
 impl Prepass {
     /// 要展开成几个偏移、几个行距（`GetStructuredStateOp::getOffsetAndStrideTypes`）；不展开是 `None`。
     fn segments(t: &Type<'_>) -> Option<(usize, usize)> {
+        // C++ 两处都只认 `RankedTensorType`：vector、memref、无秩的张量不算
+        let ranked = |t: &Type<'_>| match t {
+            Type::Shaped(s) if s.kind == mlirformat::ShapedKind::Tensor => s.shape.as_ref().map(Vec::len),
+            _ => None,
+        };
         match t {
             Type::Shaped(_) => {
                 let e = t.element_type();
-                let r = t.dims()?.len();
+                let r = ranked(t)?;
                 let int_like = matches!(e, Type::Integer { width, .. } if *width != 1) || matches!(e, Type::Index);
                 let ptr = matches!(e, Type::Extended(x) if x.name == "tt.ptr");
                 (int_like || ptr).then_some((r, r))
             }
-            Type::Extended(x) if x.name == "tt.ptr" => match pointee(t) {
-                p @ Type::Shaped(_) => p.dims().map(|d| (d.len(), d.len())),
-                _ => Some((1, 0)),
-            },
+            Type::Extended(x) if x.name == "tt.ptr" => Some(ranked(&pointee(t)).map_or((1, 0), |r| (r, r))),
             _ => None,
         }
     }
