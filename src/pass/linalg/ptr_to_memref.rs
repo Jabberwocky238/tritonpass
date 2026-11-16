@@ -62,6 +62,9 @@ impl Sig {
     /// `FunctionOpInterfaceSignatureConversion`（`convertFuncOpTypes`）：签名转换只施在入口块上
     /// （`applySignatureConversion(&body.front(), …)`）；别的块的参数归分支 op 的转换管，这里没有那些模式，原样留着
     /// （分支传进去的是源物化的 cast，类型对得上）。
+    ///
+    /// 有函数体又返回指针的：C++ 换了结果类型却不换 return 的操作数，参照的验证器拒收；这里报错，函数留着不合法，
+    /// 转换失败。只是声明的照常换类型。
     #[convert("func.func", "tt.func")]
     fn function(cr: &mut Cr<'_, '_, '_>, op: OpId, _: &[Vec<ValueId>]) -> bool {
         let Some(ft) = Self::function_type(cr.rw.body, op) else { return false };
@@ -74,7 +77,13 @@ impl Sig {
         let Some(results) = tc.convert_all(&ft.results) else { return false };
         let converter = cr.current.expect("转换器");
         let region = cr.rw.body[op].regions[0];
-        if let Some(&entry) = cr.rw.body[region].blocks.first() {
+        let entry = cr.rw.body[region].blocks.first().copied();
+        if entry.is_some() && results != ft.results {
+            let name = cr.rw.body[op].get("sym_name").and_then(|n| n.text().ok()).unwrap_or_default();
+            cr.rw.body.emit_error(op, format!("函数 @{name} 返回指针：triton-ptr-to-memref 只换签名、不换 return 的操作数，返回值的类型对不上"));
+            return false;
+        }
+        if let Some(entry) = entry {
             cr.apply_signature_conversion(entry, &sig, Some(converter));
         }
         let nt = FunctionType { inputs: sig.converted_types().to_vec(), results, ..ft };
