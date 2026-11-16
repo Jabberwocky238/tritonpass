@@ -105,7 +105,8 @@ impl TtCanon {
                     return None;
                 }
                 let kind = crate::ir::float_kind(&res_ty)?;
-                let zero = crate::ir::float(kind, if f.is_negative() { -0.0 } else { 0.0 });
+                // 没有布局的浮点（f8E4M3FNUZ 一类）建不出常量：不折（C++ 折成 +0）
+                let zero = crate::ir::float(kind, if f.is_negative() { -0.0 } else { 0.0 })?;
                 Self::attr(if matches!(res_ty, Type::Shaped(_)) { Const::splat(zero, res_ty) } else { Const::scalar(zero, res_ty) })
             }
             // trans(x, 恒等次序) 且类型相同 ⇒ x

@@ -149,9 +149,9 @@ impl<'a> Build<'a> for Body<'a> {
     }
 }
 
-/// 浮点标量。
-pub fn float(kind: FloatKind, x: f64) -> Scalar {
-    Scalar::Float(ApFloat::from_f64(kind, x).unwrap_or_else(|| ApFloat::nan(kind)))
+/// 浮点标量；`kind` 在 mlirformat 的 `ApFloat` 里没有布局（f8E4M3FNUZ、f8E5M2FNUZ 一类）时是 `None`，调用方就此作罢。
+pub fn float(kind: FloatKind, x: f64) -> Option<Scalar> {
+    ApFloat::from_f64(kind, x).map(Scalar::Float)
 }
 
 /// 整数标量。

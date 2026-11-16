@@ -362,7 +362,9 @@ impl Tt {
         let mut acc = c;
         if Self::zero_tensor(cr.rw.body, c) {
             let init = cr.empty(&L::dims(&rt), et.clone(), &[]);
-            let z = if integers { crate::ir::integer(et.bit_width().unwrap_or(32), 0) } else { crate::ir::float(crate::ir::float_kind(&et).expect("浮点"), 0.0) };
+            let z = if integers { Some(crate::ir::integer(et.bit_width().unwrap_or(32), 0)) } else { crate::ir::float_kind(&et).and_then(|k| crate::ir::float(k, 0.0)) };
+            // 没有布局的浮点（f8E4M3FNUZ 一类）建不出 0：不改写（已建的 op 随之回退）
+            let Some(z) = z else { return false };
             let zero = L::constant(cr, z, &et);
             acc = L::fill(cr, zero, init);
         }
@@ -420,7 +422,8 @@ impl Tt {
         let f32_acc = Reduce::needs_f32(&et, rk);
         let ct = if f32_acc { Type::Float(mlirformat::FloatKind::F32) } else { et.clone() };
         let rloc = cr.rw.body[rop].loc.clone();
-        let base = L::constant(cr, Reduce::base(rk, &ct), &ct);
+        let Some(bv) = Reduce::base(rk, &ct) else { return false };
+        let base = L::constant(cr, bv, &ct);
         let bop = cr.rw.body.def_op(base).expect("常量");
         cr.rw.body[bop].loc = rloc;
         let shape = if vector { Vec::new() } else { L::dims(&rt) };
@@ -697,7 +700,8 @@ impl Tt {
         let scalar = !matches!(result_ty, Type::Shaped(_));
         let shape = if scalar { Vec::new() } else { L::dims(&result_ty) };
         let kind = crate::ir::float_kind(&vt).unwrap_or(mlirformat::FloatKind::F32);
-        let vbase = L::constant(cr, crate::ir::float(kind, base), &vt);
+        let Some(vb) = crate::ir::float(kind, base) else { return false };
+        let vbase = L::constant(cr, vb, &vt);
         let width = it.int_width().map_or(32, |(w, _)| w);
         let ibase = L::constant(cr, crate::ir::integer(width, -1), &it);
         let vinit = cr.empty(&shape, vt.clone(), &[]);
@@ -895,12 +899,13 @@ impl Reduce {
         matches!(et, Type::Float(_)) && et.bit_width().is_some_and(|w| w < 32) && matches!(k, Kind::ArithAddf | Kind::ArithMulf | Kind::ArithMaximumf | Kind::ArithMaxnumf | Kind::ArithMinimumf | Kind::ArithMinnumf)
     }
 
-    fn base(k: Kind, t: &Type<'_>) -> Scalar {
+    /// 组合器的初值；没有布局的浮点（f8E4M3FNUZ 一类）是 `None`。
+    fn base(k: Kind, t: &Type<'_>) -> Option<Scalar> {
         use Kind as K;
         let w = t.bit_width().unwrap_or(32);
         let fk = crate::ir::float_kind(t);
-        let f = |x: f64| crate::ir::float(fk.expect("浮点"), x);
-        let i = |x: i128| crate::ir::integer(w, x);
+        let f = |x: f64| fk.and_then(|kind| crate::ir::float(kind, x));
+        let i = |x: i128| Some(crate::ir::integer(w, x));
         match k {
             K::ArithAddf => f(0.0),
             K::ArithMaximumf | K::ArithMaxnumf => f(f64::NEG_INFINITY),

@@ -232,7 +232,9 @@ impl NoTc {
         if let Some(x) = other.filter(|x| !Mem::positive_zero(cr.rw.body, *x)) {
             Self::fill(cr, x, alloc);
         } else if !full {
-            let d = <Body<'_> as crate::Build<'_>>::constant_data(Self::zero(&elem), &elem);
+            // 没有布局的浮点（f8E4M3FNUZ 一类）建不出 0：这条模式不做（已建的 op 随之回退）
+            let Some(zero) = Self::zero(&elem) else { return false };
+            let d = <Body<'_> as crate::Build<'_>>::constant_data(zero, &elem);
             let z = Mem::create(cr, d, elem.clone());
             Self::fill(cr, z, alloc);
         }
@@ -315,10 +317,10 @@ impl NoTc {
         (mask.expect("有 mask"), false)
     }
 
-    fn zero(t: &Type<'_>) -> mlirformat::Scalar {
+    fn zero(t: &Type<'_>) -> Option<mlirformat::Scalar> {
         match crate::ir::float_kind(t) {
             Some(k) => crate::ir::float(k, 0.0),
-            None => crate::ir::integer(t.bit_width().unwrap_or(32), 0),
+            None => Some(crate::ir::integer(t.bit_width().unwrap_or(32), 0)),
         }
     }
 
