@@ -62,14 +62,19 @@ struct Affine {
 }
 
 impl Affine {
-    /// 加上第 `axis` 根轴上的一项（乘上 `sign`）。同轴已有一项而长度不同（一边是 broadcast 之前长 1 的那根轴）认不出，返回 `None`。
+    /// 加上第 `axis` 根轴上的一项（乘上 `sign`）。同轴已有一项而长度不同（一边是 broadcast 之前长 1 的那根轴）、或 i64 溢出，认不出，
+    /// 返回 `None`。
     fn add_term(&mut self, axis: usize, mut v: Vec<i64>, sign: i64) -> Option<()> {
-        v.iter_mut().for_each(|x| *x *= sign);
+        for x in &mut v {
+            *x = x.checked_mul(sign)?;
+        }
         if let Some(t) = self.terms.iter_mut().find(|t| t.axis == axis) {
             if t.v.len() != v.len() {
                 return None;
             }
-            t.v.iter_mut().zip(&v).for_each(|(a, b)| *a += b);
+            for (a, b) in t.v.iter_mut().zip(&v) {
+                *a = a.checked_add(*b)?;
+            }
             return Some(());
         }
         self.terms.push(Term { axis, v });
@@ -171,7 +176,7 @@ impl Folder<'_, '_, '_> {
                 let sub = k == Kind::ArithSubi;
                 let mut out = l.clone();
                 out.scalar = self.scalar_combine(l.scalar, r.scalar, sub);
-                out.c0 = if sub { l.c0 - r.c0 } else { l.c0 + r.c0 };
+                out.c0 = if sub { l.c0.checked_sub(r.c0)? } else { l.c0.checked_add(r.c0)? };
                 for t in &r.terms {
                     out.add_term(t.axis, t.v.clone(), if sub { -1 } else { 1 })?;
                 }
@@ -194,8 +199,12 @@ impl Folder<'_, '_, '_> {
                     let kv = self.i32(k);
                     out.scalar = Some(self.c.binary(Kind::ArithMuli, s, kv));
                 }
-                out.c0 *= k;
-                out.terms.iter_mut().for_each(|t| t.v.iter_mut().for_each(|x| *x *= k));
+                out.c0 = out.c0.checked_mul(k)?;
+                for t in &mut out.terms {
+                    for x in &mut t.v {
+                        *x = x.checked_mul(k)?;
+                    }
+                }
                 Some(out)
             }
             Some(k @ (Kind::ArithDivsi | Kind::ArithRemsi)) => {
@@ -208,12 +217,13 @@ impl Folder<'_, '_, '_> {
                 }
                 let div = k == Kind::ArithDivsi;
                 let c = r.c0;
-                let apply = |x: i64| if div { x / c } else { x % c };
+                // i64 里的除与取余也会溢出（i64::MIN / -1）：认不出
+                let apply = |x: i64| if div { x.checked_div(c) } else { x.checked_rem(c) };
                 if l.terms.is_empty() {
-                    out.c0 = apply(l.c0);
+                    out.c0 = apply(l.c0)?;
                     return Some(out);
                 }
-                let data = l.terms[0].v.iter().map(|x| apply(x + l.c0)).collect();
+                let data = l.terms[0].v.iter().map(|x| x.checked_add(l.c0).and_then(apply)).collect::<Option<_>>()?;
                 out.add_term(l.terms[0].axis, data, 1)?;
                 Some(out)
             }
@@ -253,11 +263,16 @@ impl Folder<'_, '_, '_> {
     #[allow(clippy::cast_precision_loss)]
     fn axis_vector(&mut self, v: &[i64]) -> Option<ValueId> {
         let n = v.len() as i64;
+        // 斜率与各台阶先在 i64 里算好（溢出就认不出），再建 op
+        let slope = match v.get(1) {
+            Some(x) => x.checked_sub(v[0])?,
+            None => 0,
+        };
+        let arithmetic = v.iter().enumerate().all(|(i, x)| slope.checked_mul(i as i64).and_then(|s| v[0].checked_add(s)) == Some(*x));
+        let deltas: Vec<i64> = v.windows(2).map(|w| w[1].checked_sub(w[0])).collect::<Option<_>>()?;
         let f32t = Type::tensor(&[n], Type::Float(FloatKind::F32));
         let idx = self.c.value_with(Kind::TtMakeRange, &[], &[("end", Attribute::of_int(i128::from(n), int(32))), ("start", Attribute::of_int(0, int(32)))], Type::tensor(&[n], int(32)));
         let idxf = self.c.value(Kind::ArithSitofp, &[idx], f32t);
-        let slope = v.get(1).map_or(0, |x| x - v[0]);
-        let arithmetic = v.iter().enumerate().all(|(i, x)| *x == v[0] + slope * i as i64);
         let mut result = self.f32_splat(v[0] as f32 as f64, &[n]);
         if arithmetic {
             if slope != 0 {
@@ -282,7 +297,7 @@ impl Folder<'_, '_, '_> {
             }
             let at = self.f32_splat(i as f32 as f64, &[n]);
             let ge = self.cmpf(CmpFPredicate::oge, idxf, at);
-            let d = self.f32_splat((v[i] - v[i - 1]) as f32 as f64, &[n]);
+            let d = self.f32_splat(deltas[i - 1] as f32 as f64, &[n]);
             let step = self.c.select(ge, d, zero);
             result = self.c.binary(Kind::ArithAddf, result, step);
         }
@@ -334,7 +349,7 @@ impl Folder<'_, '_, '_> {
         let (l, r) = (l?, r?);
         let mut d = l.clone();
         d.scalar = self.scalar_combine(l.scalar, r.scalar, true);
-        d.c0 = l.c0 - r.c0;
+        d.c0 = l.c0.checked_sub(r.c0)?;
         for t in &r.terms {
             d.add_term(t.axis, t.v.clone(), -1)?;
         }

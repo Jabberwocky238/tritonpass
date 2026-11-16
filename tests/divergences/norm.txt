@@ -6,3 +6,5 @@ regress__norm__bool_ptr.0#1      参照不换 scf.while 体与非入口块的块
 regress__norm__bool_ptr.0#2      参照不换函数类型的结果，tt.return 的 ptr<i8> 与函数结果 ptr<i1> 不符，过不了它自己的校验
 regress__norm__iota_term_length.0#0      参照把同一根轴上长 1 与长 8 的两项逐位相加，断言失败（idx < size()）；tritonpass 认不出、不改
 regress__norm__iota_term_length.0#1      参照只把长 1 的项加到长 8 那项的第一位，折出错的向量 [3, 1, 2, …, 7]（应是 [3, 4, …, 10]）；tritonpass 认不出、不改
+regress__norm__iota_overflow.0#0         参照在 int64 里回绕着算（INT64_MIN / -1 也照除），折出错的常量 -4.6e18；按 i32 的语义每格都是 0。tritonpass 溢出即认不出、不改
+regress__norm__iota_overflow.0#1         参照在 int64 里回绕着算，折出错的常量 4.6e18；按 i32 的语义每格都是 0。tritonpass 溢出即认不出、不改
