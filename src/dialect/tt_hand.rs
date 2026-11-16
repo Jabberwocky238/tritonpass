@@ -942,8 +942,9 @@ fn print_groups(p: &mut Printer<'_, '_>, values: &[Value<'_>], groups: usize) ->
         print_values(p, if n == 0 { &[] } else { g })?;
         p.write_char(']')?;
     }
+    // 各组都空（0 维的块指针）：上面一组也没写，这里写全 `[], [], …`
     if n == 0 {
-        for i in 1..groups {
+        for i in 0..groups {
             p.write_str(if i > 0 { ", []" } else { "[]" })?;
         }
     }
