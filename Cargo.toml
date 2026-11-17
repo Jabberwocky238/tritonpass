@@ -1,6 +1,6 @@
 [package]
 name = "tritonpass"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # 依赖 mlirformat 0.8 用了 `if let` 守卫（1.95 稳定）：1.94 编不过，1.95 可以
 rust-version = "1.95"
@@ -11,7 +11,7 @@ keywords = ["triton", "mlir", "compiler"]
 categories = ["compilers"]
 readme = "README.md"
 # 子模块（Triton 源码，只为钉版本与生成）与对拍夹具（十几 MB）不进发布包
-exclude = ["third_party/", "tests/", "scripts/"]
+exclude = ["third_party/", "tests/", "scripts/", ".github/"]
 
 [dependencies]
 mlirformat = { version = "=0.8.0", default-features = false }

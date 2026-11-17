@@ -5,6 +5,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-17
+
+Compatible with 0.2.0: every public signature of 0.2.0 is unchanged.
+
 ### Added
 
 - `tritonpass::verify`, the `triton-verify` pass and `run_chunk_verified`: the type checks MLIR's verifiers make and
@@ -12,6 +16,9 @@ follow [Semantic Versioning](https://semver.org/).
   returns and `func.call` / `tt.call` signatures; `tt.addptr`, `tt.load` / `tt.store`, `arith.select`, comparisons).
   The `opt` example and the fixture test check every chunk's input and result, so IR whose types do not line up is an
   error instead of being printed with exit code 0.
+- `try_float` and `Tptr::try_of`, which return `None` where `float` / `Tptr::of` panic (a float kind without a layout,
+  such as f8E4M3FNUZ; a negative segment size), and `Window::written_bases`, which finds every written base in one walk
+  instead of one `Window::is_written` scan per load.
 - tt canonicalization: `TransOp::fold` for `trans(trans)` and transposes of splat constants, `AdvanceOp::fold` for
   all-zero offsets.
 - `opt` example: `-` reads standard input; warnings the passes report are printed when the pipeline succeeds.
@@ -27,8 +34,6 @@ follow [Semantic Versioning](https://semver.org/).
   behind an improvement in another.
 - Lossy integer casts became checked conversions: an out-of-range attribute value now makes an analysis give up on the op
   instead of wrapping.
-- **Breaking:** `Tptr::of` returns `Option<Tptr>` (`None` when a segment size is negative) instead of reading such a size
-  as a huge `usize`.
 
 ### Fixed
 
@@ -58,3 +63,6 @@ follow [Semantic Versioning](https://semver.org/).
   attribute dictionaries were not sorted; f8 FNUZ constants panicked; pure `tt.extern_elementwise` /
   `tt.elementwise_inline_asm` were treated as side-effecting; `isVolatile = 1 : i1` was not treated as volatile.
 - The README example pipeline used an option `triton-arith-to-linalg` does not have.
+
+[Unreleased]: https://github.com/Jabberwocky238/tritonpass/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Jabberwocky238/tritonpass/compare/v0.2.0...v0.2.1
