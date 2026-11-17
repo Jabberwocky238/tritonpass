@@ -121,7 +121,7 @@ impl TtCanon {
                 }
                 let kind = crate::ir::float_kind(&res_ty)?;
                 // 没有布局的浮点（f8E4M3FNUZ 一类）建不出常量：不折（C++ 折成 +0）
-                let zero = crate::ir::float(kind, if f.is_negative() { -0.0 } else { 0.0 })?;
+                let zero = crate::ir::try_float(kind, if f.is_negative() { -0.0 } else { 0.0 })?;
                 Some(Self::attr(if matches!(res_ty, Type::Shaped(_)) { Const::splat(zero, res_ty) } else { Const::scalar(zero, res_ty) }))
             }
             // `TransOp::fold`：trans(x, 恒等次序) 且类型相同 ⇒ x；源是 splat 常量 ⇒ 换形状的 splat。trans(trans) 原地改，见 `trans_of_trans`

@@ -18,7 +18,7 @@ mod verify;
 
 pub use dialect::{TtDialect, TtgDialect, TtsDialect, load_triton, pointee};
 pub use grid::GridEncoding;
-pub use ir::{At, Build, DYNAMIC, Ir, TtBuilder, dense_i32, dense_i64, dense_values, float, float_kind, i64_attr, int, integer};
+pub use ir::{At, Build, DYNAMIC, Ir, TtBuilder, dense_i32, dense_i64, dense_values, float, float_kind, i64_attr, int, integer, try_float};
 pub use kind::{Kind, Namespace};
 pub use pass::*;
 pub use verify::{ChunkOutput, Verify, run_chunk_verified, verify};

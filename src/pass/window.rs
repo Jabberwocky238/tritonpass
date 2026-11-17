@@ -42,8 +42,14 @@ pub struct Tptr {
 }
 
 impl Tptr {
+    /// tts.make_tptr 的视图（0.2.0 起的接口，原样保留）：`operandSegmentSizes` 不合法（负数）时 panic，要不 panic 用
+    /// [`Self::try_of`]。
+    pub fn of(b: &Body<'_>, op: OpId) -> Self {
+        Self::try_of(b, op).expect("tts.make_tptr 的 operandSegmentSizes 不合法")
+    }
+
     /// 读一个 tts.make_tptr；段长（operandSegmentSizes）是负数时认不出（`None`）。
-    pub fn of(b: &Body<'_>, op: OpId) -> Option<Self> {
+    pub fn try_of(b: &Body<'_>, op: OpId) -> Option<Self> {
         let seg = dense_values(b[op].get("operandSegmentSizes"));
         let ops = &b[op].operands;
         let n = |i: usize| usize::try_from(seg.get(i).copied().unwrap_or(0)).ok();
@@ -272,6 +278,13 @@ impl Window {
         out
     }
 
+    /// `op`（tts.make_tptr）的基址在任何地方被 tts.store 写过（0.2.0 起的接口，原样保留）。一次要问很多处时用
+    /// [`Self::written_bases`]，只走一遍。
+    pub fn is_written(b: &Body<'_>, op: OpId) -> bool {
+        let base = b.opd(op, 0);
+        b[base].uses.iter().any(|u| b.is(u.op, Kind::TtsMakeTptr) && b[b.res(u.op, 0)].uses.iter().any(|w| b.is(w.op, Kind::TtsStore)))
+    }
+
     /// 被 tts.store 写的基址：同一个基址在任何地方经 tts.make_tptr 交给 tts.store，都算被写。整个 `root` 一次算好，
     /// 读的预检按基址查（每读一次都扫一遍基址的全部用处，同一个基址读得多的 kernel 是平方的）。
     pub fn written_bases(b: &Body<'_>, root: OpId) -> BTreeSet<ValueId> {
@@ -291,7 +304,7 @@ impl Window {
 
     /// 预检：问题按出现次序记进 `found`，返回能不能成窗口。
     pub fn check(b: &Body<'_>, op: OpId, write: bool, found: &mut Vec<WindowIssue>) -> bool {
-        let Some(t) = Tptr::of(b, op) else {
+        let Some(t) = Tptr::try_of(b, op) else {
             found.push(WindowIssue::Form("tts.make_tptr 的段长（operandSegmentSizes）是负数，读不出各段"));
             return false;
         };

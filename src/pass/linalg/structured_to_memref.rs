@@ -158,7 +158,7 @@ struct WithTc;
 impl WithTc {
     #[convert("tts.make_tptr")]
     fn make_tptr(cr: &mut Cr<'_, '_, '_>, op: OpId, o: &[Vec<ValueId>]) -> bool {
-        let Some(t) = Tptr::of(cr.rw.body, op) else { return false };
+        let Some(t) = Tptr::try_of(cr.rw.body, op) else { return false };
         // 0 维的没有窗口可建（C++ 取第 0 维时越界断言）：报错，转换失败
         if t.sizes.is_empty() {
             cr.rw.body.emit_error(op, "tts.make_tptr 是 0 维的：结构化指针至少要有一维才建得出视图");
@@ -247,7 +247,7 @@ impl NoTc {
         if !Window::check(b, make, written.contains(&b.opd(make, 0)), &mut Vec::new()) {
             return false;
         }
-        let Some(t) = Tptr::of(b, make) else { return false };
+        let Some(t) = Tptr::try_of(b, make) else { return false };
         let Ok(plan) = Window::plan(b, &t) else { return false };
         let tt = b.ty(b.res(op, 0)).clone();
         let shape = tt.dims().unwrap_or_default();
@@ -296,7 +296,7 @@ impl NoTc {
         if !Window::check(b, make, true, &mut Vec::new()) {
             return false;
         }
-        let Some(t) = Tptr::of(b, make) else { return false };
+        let Some(t) = Tptr::try_of(b, make) else { return false };
         let Ok(plan) = Window::plan(b, &t) else { return false };
         let value = b.opd(op, 1);
         let vt = b.ty(value).clone();
@@ -354,7 +354,7 @@ impl NoTc {
 
     fn zero(t: &Type<'_>) -> Option<mlirformat::Scalar> {
         match crate::ir::float_kind(t) {
-            Some(k) => crate::ir::float(k, 0.0),
+            Some(k) => crate::ir::try_float(k, 0.0),
             None => Some(crate::ir::integer(t.bit_width().unwrap_or(32), 0)),
         }
     }

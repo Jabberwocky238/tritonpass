@@ -250,7 +250,7 @@ impl Folder<'_, '_, '_> {
 
     /// f32 的 splat 常量张量（形状同 `like`）。
     fn f32_splat(&mut self, value: f64, shape: &[i64]) -> ValueId {
-        self.c.scalar(float(FloatKind::F32, value).expect("f32 总有布局"), Type::tensor(shape, Type::Float(FloatKind::F32)))
+        self.c.scalar(float(FloatKind::F32, value), Type::tensor(shape, Type::Float(FloatKind::F32)))
     }
 
     fn cmpf(&mut self, pred: CmpFPredicate, l: ValueId, r: ValueId) -> ValueId {

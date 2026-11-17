@@ -150,8 +150,13 @@ impl<'a> Build<'a> for Body<'a> {
 }
 
 /// 浮点标量；`kind` 在 mlirformat 的 `ApFloat` 里没有布局（f8E4M3FNUZ、f8E5M2FNUZ 一类）时是 `None`，调用方就此作罢。
-pub fn float(kind: FloatKind, x: f64) -> Option<Scalar> {
+pub fn try_float(kind: FloatKind, x: f64) -> Option<Scalar> {
     ApFloat::from_f64(kind, x).map(Scalar::Float)
+}
+
+/// 浮点标量（0.2.0 起的接口，原样保留）：`kind` 没有布局时 panic（`ApFloat::nan` 那里），要不 panic 用 [`try_float`]。
+pub fn float(kind: FloatKind, x: f64) -> Scalar {
+    Scalar::Float(ApFloat::from_f64(kind, x).unwrap_or_else(|| ApFloat::nan(kind)))
 }
 
 /// 整数标量。
